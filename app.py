@@ -11,6 +11,7 @@ import io
 import llm_layer
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import requests
 import streamlit as st
 
 import chat_assistant
+import doc_contract
 import email_generator
 import knowledge_base
 import pdf_ingest
@@ -74,7 +76,10 @@ STATUS_META = {
     STATUS_FAIL: {"label": "⛔ FAIL", "bg": "#FFEBEE", "fg": "#B71C1C"},
 }
 
-# 手动编辑（P1）暴露的字段：key -> (中文名, 控件类型, 附加参数)
+# 手动编辑（P1/F05）暴露的字段：key -> (中文名, 控件类型, 附加参数)
+# - 全部字段对每份单证渲染（缺失字段可补齐，不再跳过）；
+# - route_countries 用列表序列化（顿号/逗号分隔），修复手机端"列表变字符串"；
+# - waybill_type 限定受支持枚举（与 F07 契约一致）。
 EDITABLE_FIELDS = [
     ("goods_description", "货物描述", "text", None),
     ("total_packages", "件数（箱数）", "int", None),
@@ -83,13 +88,16 @@ EDITABLE_FIELDS = [
     ("consignee_name", "收货人名称", "text", None),
     ("total_amount", "发票总金额", "float", 100.0),
     ("declared_value", "报关申报金额", "float", 100.0),
+    ("currency", "币种（如USD）", "text", None),
     ("waybill_no", "运单号", "text", None),
-    ("waybill_type", "运单类型", "select",
-     ["SMGS国际货协运单", "CIM国际铁路运单", "CIM/SMGS统一运单"]),
+    ("waybill_type", "运单类型", "select", doc_contract.SUPPORTED_WAYBILL_TYPES),
     ("container_no", "集装箱号", "text", None),
     ("departure_country", "起运国", "text", None),
     ("destination_country", "运抵国", "text", None),
+    ("route_countries", "经停国家（顿号/逗号分隔，保存为列表）", "list", None),
 ]
+
+_WAYBILL_UNSET = "（不设置/留空）"
 
 
 @st.cache_data(show_spinner=False)
@@ -468,46 +476,84 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
 # ---------------------------------------------------------------- 手动编辑（P1）
 
 
+def _parse_numeric_text(text: str, kind: str):
+    """编辑框文本按字段类型解析（F05；契约实现见 doc_contract.parse_edited_number）。"""
+    return doc_contract.parse_edited_number(text, as_int=(kind == "int")), True
+
+
+def _serialize_edited_value(kind: str, text: str):
+    """按字段类型序列化编辑值；返回 None 表示该字段应删除/不设置。"""
+    if kind == "list":
+        return doc_contract.split_route_text(text)
+    return text.strip() or None
+
+
 def collect_edited_documents(batch: dict) -> tuple[list, int]:
-    """渲染编辑控件并返回合并后的单证列表 + 修改字段数。"""
+    """渲染编辑控件并返回合并后的单证列表 + 修改字段数。
+    F05：编辑表单来自契约字段定义——缺失字段也渲染控件（可补齐）；
+    按字段类型序列化（数值保持数值、路线保持字符串列表）。"""
     batch_id = batch["batch_id"]
     edited = 0
     documents = []
     for doc in batch["documents"]:
-        fields = dict(doc.get("fields") or {})
+        original_fields = dict(doc.get("fields") or {})
+        fields: dict = {}
         with st.expander(f"📄 {_doc_title(doc)}（{doc.get('doc_id', '')}）"):
             for key, label, kind, extra in EDITABLE_FIELDS:
-                if key not in fields:
-                    continue
                 widget_key = f"fld::{batch_id}::{doc['doc_id']}::{key}"
-                original = fields[key]
-                if kind == "text":
-                    value = st.text_input(label, value=str(original), key=widget_key)
-                    new_value = value.strip()
-                elif kind == "int":
-                    value = st.number_input(label, value=int(float(original)),
-                                            min_value=0, step=1, key=widget_key)
-                    new_value = int(value)
-                elif kind == "float":
-                    value = st.number_input(label, value=float(original),
-                                            min_value=0.0, step=extra or 1.0,
-                                            key=widget_key)
-                    new_value = round(float(value), 2)
-                else:  # select
-                    options = list(extra or [])
-                    if original not in options:
-                        options = [str(original)] + options
-                    value = st.selectbox(label, options,
-                                         index=options.index(original), key=widget_key)
-                    new_value = value
-                # 数值字段按数值比较（number_input 会把 int 转成 float，避免误报"已修改"）
+                has_original = key in original_fields
+                original = original_fields.get(key)
+                new_value = None
+                included = False
+
                 if kind in ("int", "float"):
-                    changed = float(new_value) != float(original)
-                else:
-                    changed = str(new_value) != str(original)
-                if changed:
+                    try:
+                        seed = float(original) if has_original else 0.0
+                        numeric_seed = seed
+                    except (TypeError, ValueError):
+                        numeric_seed = None
+                    if numeric_seed is None:
+                        # 原值不是纯数字（如"12300kg"）：退化为文本框，解析交给引擎口径
+                        text = st.text_input(label, value="" if original is None else str(original),
+                                             key=widget_key)
+                        parsed, included = _parse_numeric_text(text, kind)
+                        new_value = parsed
+                    else:
+                        step = extra or 1.0
+                        value = st.number_input(label, value=numeric_seed,
+                                                min_value=0.0, step=step, key=widget_key)
+                        new_value = int(value) if kind == "int" else round(float(value), 2)
+                        included = has_original or new_value not in (0, 0.0)
+                elif kind == "select":
+                    options = list(extra or [])
+                    if has_original and str(original) not in options:
+                        options = [str(original)] + options
+                    if has_original:
+                        value = st.selectbox(label, options,
+                                             index=options.index(str(original)), key=widget_key)
+                        new_value, included = value, True
+                    else:
+                        value = st.selectbox(label, [_WAYBILL_UNSET] + options,
+                                             index=0, key=widget_key)
+                        new_value = None if value == _WAYBILL_UNSET else value
+                        included = new_value is not None
+                elif kind == "list":
+                    display = "、".join(str(x) for x in original) if isinstance(original, list) \
+                        else ("" if original is None else str(original))
+                    text = st.text_input(label, value=display, key=widget_key)
+                    new_value = _serialize_edited_value("list", text)
+                    included = new_value is not None
+                else:   # text
+                    text = st.text_input(label, value="" if original is None else str(original),
+                                         key=widget_key)
+                    new_value = _serialize_edited_value("text", text)
+                    included = new_value is not None
+
+                if included:
+                    fields[key] = new_value
+                if doc_contract.canonical_json(fields.get(key)) != doc_contract.canonical_json(
+                        original if has_original else None):
                     edited += 1
-                fields[key] = new_value
         documents.append({**doc, "fields": fields})
     return documents, edited
 

@@ -63,6 +63,69 @@ const fieldTypeNames = {
   'unknown': '无法识别（请人工选择）',
 };
 
+// 各单证类型的契约字段（与后端 doc_contract.REQUIRED_FIELDS 同口径）。
+// 编辑页按「已提取字段 ∪ 所选类型的契约字段」渲染——更换单证类型后
+// 目标类型的字段立即出现，缺失字段可人工补齐（修复审查 F05）。
+const Map<String, List<String>> docTypeRequiredFields = {
+  'invoice': [
+    'invoice_no', 'consignor_name', 'consignee_name', 'goods_description',
+    'total_packages', 'gross_weight_kg', 'total_amount', 'currency',
+  ],
+  'packing_list': [
+    'packing_list_no', 'consignor_name', 'consignee_name', 'goods_description',
+    'total_packages', 'gross_weight_kg', 'container_no',
+  ],
+  'railway_waybill': [
+    'waybill_no', 'waybill_type', 'consignor_name', 'consignee_name',
+    'route_countries', 'goods_description', 'total_packages',
+    'gross_weight_kg', 'container_no',
+  ],
+  'export_customs_declaration': [
+    'declaration_no', 'consignor_name', 'consignee_name', 'goods_description',
+    'total_packages', 'gross_weight_kg', 'declared_value', 'currency',
+    'waybill_no', 'container_no', 'departure_country', 'destination_country',
+  ],
+  'certificate_of_origin': [
+    'co_no', 'consignor_name', 'consignee_name', 'goods_description',
+    'total_packages',
+  ],
+  'unknown': [],
+};
+
+const numericFieldNames = {
+  'total_packages', 'gross_weight_kg', 'net_weight_kg', 'total_amount',
+  'declared_value',
+};
+
+const listFieldNames = {'route_countries'};
+
+/// 编辑框文本 → 字段真实类型（保存时调用）。
+/// route_countries 保持字符串列表（修复"列表被编辑成字符串"缺陷）；
+/// 数值字段解析为 num；其余为字符串；空值返回 null（删除该字段）。
+dynamic serializeFieldValue(String key, String raw) {
+  final text = raw.trim();
+  if (text.isEmpty) return null;
+  if (listFieldNames.contains(key)) {
+    final parts = text
+        .split(RegExp(r'[、，,]|->|→'))
+        .map((p) => p.trim())
+        .where((p) => p.isNotEmpty)
+        .toList();
+    return parts.isEmpty ? null : parts;
+  }
+  if (numericFieldNames.contains(key)) {
+    return num.tryParse(text) ?? text; // 解析失败保留原文，由后端口径判待复核
+  }
+  return text;
+}
+
+/// 字段值 → 编辑框显示文本（列表用顿号连接，其余 toString）。
+String displayFieldValue(dynamic v) {
+  if (v == null) return '';
+  if (v is List) return v.join('、');
+  return '$v';
+}
+
 class VerifyReport {
   VerifyReport.fromJson(Map<String, dynamic> j)
       : summary = j['summary'],
@@ -457,12 +520,21 @@ class EditFieldsPage extends StatefulWidget {
 
 class _EditFieldsPageState extends State<EditFieldsPage> {
   late DocEntry _entry;
+  late String _docType;
   final Map<String, TextEditingController> _controllers = {};
 
   @override
   void initState() {
     super.initState();
     _entry = widget.entry;
+    _docType = _entry.docType;
+  }
+
+  /// 当前应渲染的字段 = 已提取字段 ∪ 置信度字段 ∪ 所选类型契约字段。
+  Set<String> _visibleKeys() {
+    final keys = <String>{..._entry.fields.keys, ..._entry.confidence.keys};
+    keys.addAll(docTypeRequiredFields[_docType] ?? const []);
+    return keys;
   }
 
   @override
@@ -475,44 +547,52 @@ class _EditFieldsPageState extends State<EditFieldsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final keys = _entry.confidence.keys.toList()..sort();
+    final keys = _visibleKeys().toList()..sort();
     return Scaffold(
       appBar: AppBar(title: Text('编辑字段 · ${_entry.fileName}')),
       body: ListView(padding: const EdgeInsets.all(14), children: [
         DropdownButtonFormField<String>(
-          initialValue: _entry.docType,
+          initialValue: _docType,
           decoration: const InputDecoration(
-              labelText: '单证类型（自动判断，可纠正）',
+              labelText: '单证类型（自动判断，可纠正；更换后出现对应字段）',
               border: OutlineInputBorder()),
           items: fieldTypeNames.entries
               .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
               .toList(),
-          onChanged: (v) => setState(() => _entry.docType = v ?? _entry.docType),
+          onChanged: (v) => setState(() => _docType = v ?? _docType),
         ),
         const SizedBox(height: 6),
-        Text('低置信度/提取失败的字段以 ⚠️ 标注，请人工补齐或修正后保存。',
+        Text('低置信度/提取失败的字段以 ⚠️ 标注，缺失字段可直接填写；'
+                '经停国家用顿号或逗号分隔（保存为列表）。',
             style: TextStyle(fontSize: 12, color: Colors.orange.shade800)),
         const SizedBox(height: 10),
         for (final k in keys)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 5),
             child: TextField(
-              controller: _controllers.putIfAbsent(
-                  k, () => TextEditingController(text: '${_entry.fields[k] ?? ''}')),
+              controller: _controllers.putIfAbsent(k,
+                  () => TextEditingController(text: displayFieldValue(_entry.fields[k]))),
+              keyboardType: numericFieldNames.contains(k)
+                  ? const TextInputType.numberWithOptions(decimal: true)
+                  : TextInputType.text,
               decoration: InputDecoration(
                 labelText: k,
                 border: const OutlineInputBorder(),
-                suffixIcon: _entry.confidence[k] == 'missing'
+                suffixIcon: (_entry.confidence[k] == 'missing' ||
+                        _entry.confidence[k] == 'review')
                     ? const Tooltip(
-                        message: '提取失败/需人工核对',
+                        message: '提取失败/口径存疑，需人工核对',
                         child: Icon(Icons.warning_amber_rounded,
                             color: Colors.orange))
-                    : const Tooltip(
-                        message: '高置信度自动提取',
-                        child: Icon(Icons.check_circle_outline,
-                            color: Colors.green)),
+                    : _entry.confidence[k] == 'high'
+                        ? const Tooltip(
+                            message: '高置信度自动提取',
+                            child: Icon(Icons.check_circle_outline,
+                                color: Colors.green))
+                        : const Tooltip(
+                            message: '契约字段，请人工填写',
+                            child: Icon(Icons.edit_note, color: Colors.blue)),
               ),
-              onChanged: (v) => _entry.fields[k] = v.trim(),
             ),
           ),
         const SizedBox(height: 12),
@@ -520,11 +600,17 @@ class _EditFieldsPageState extends State<EditFieldsPage> {
           icon: const Icon(Icons.save),
           label: const Text('保存并返回'),
           onPressed: () {
-            _entry.fields.removeWhere((_, v) => v == null || '$v'.trim().isEmpty);
-            _entry.fields.forEach((k, v) {
-              final n = num.tryParse('$v');
-              _entry.fields[k] = n ?? v;
-            });
+            _entry.docType = _docType;
+            final saved = <String, dynamic>{..._entry.fields};
+            for (final k in keys) {
+              final value = serializeFieldValue(k, _controllers[k]!.text);
+              if (value == null) {
+                saved.remove(k);
+              } else {
+                saved[k] = value;
+              }
+            }
+            _entry.fields = saved;
             _entry.confidence.updateAll((k, v) =>
                 (_entry.fields[k] != null && '${_entry.fields[k]}'.isNotEmpty)
                     ? 'high'

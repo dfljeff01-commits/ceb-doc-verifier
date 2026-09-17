@@ -9,6 +9,7 @@ import copy
 
 import pytest
 
+import doc_contract
 from verification_engine import (STATUS_FAIL, STATUS_PASS, STATUS_WARNING,
                                  run_verification)
 
@@ -410,6 +411,36 @@ def test_unsupported_type_risk_is_medium():
     """类型不支持为硬错误（FAIL 25分 → 中风险），不允许 0 风险蒙混。"""
     v = run_on(lambda docs: edit(docs, "railway_waybill", "waybill_type", "AIR WAYBILL"))
     assert v["risk"]["score"] == 25 and v["risk"]["grade"] == "medium"
+
+
+# ---------------------------------------------------------------- F05：人工编辑契约（Web/App 共用）
+
+
+def test_edited_number_keeps_type():
+    """编辑后的数值必须保持数值类型；非法输入保留原文交引擎判待复核。"""
+    assert doc_contract.parse_edited_number("480", as_int=True) == 480
+    assert isinstance(doc_contract.parse_edited_number("480", as_int=True), int)
+    assert doc_contract.parse_edited_number("12300.5") == 12300.5
+    assert doc_contract.parse_edited_number("12300kg") == "12300kg"
+    assert doc_contract.parse_edited_number("  ") is None
+
+
+def test_edited_route_keeps_list():
+    """经停国家编辑后必须保持字符串列表（修复手机端"列表变字符串"）。"""
+    assert doc_contract.split_route_text("中国、俄罗斯、德国") == ["中国", "俄罗斯", "德国"]
+    assert doc_contract.split_route_text("中国,德国") == ["中国", "德国"]
+    assert doc_contract.split_route_text("中国->哈萨克斯坦→德国") == \
+        ["中国", "哈萨克斯坦", "德国"]
+    assert doc_contract.split_route_text("  ") is None
+
+
+def test_supported_waybill_type_enum_shared():
+    """Web编辑下拉与引擎枚举同源：AIR WAYBILL 不可能从合法选项进入数据。"""
+    assert doc_contract.SUPPORTED_WAYBILL_TYPES == [
+        "SMGS国际货协运单", "CIM国际铁路运单", "CIM/SMGS统一运单"]
+    assert doc_contract.classify_waybill_type("AIR WAYBILL") is None
+    assert doc_contract.classify_waybill_type("SMGS国际货协运单") == "smgs"
+    assert doc_contract.classify_waybill_type("CIM/SMGS统一运单") == "composite"
 
 
 # ---------------------------------------------------------------- 输入结构契约（F08 引擎侧）

@@ -248,6 +248,31 @@ def data_version(documents: list) -> str:
     return hashlib.sha256(canonical_json(documents).encode("utf-8")).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------- 人工编辑序列化（F05）
+
+ROUTE_SPLIT_RE = re.compile(r"[、，,]|->|→")
+
+
+def parse_edited_number(text: str, as_int: bool = False):
+    """编辑框文本 → 数值（F05：编辑不得破坏数据类型）。
+    解析成功返回数值；空返回 None（不设置）；非纯数字返回原字符串——
+    交由引擎口径判"待复核/非法"，不静默丢弃也不静默转换。"""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    num, err = parse_number(text)
+    if err == OK:
+        return int(num) if as_int and num == int(num) else round(num, 2)
+    return text
+
+
+def split_route_text(text: str) -> list | None:
+    """经停国家编辑框文本 → 字符串列表（顿号/逗号/箭头分隔，F05）。
+    空或全空白返回 None（不设置）。"""
+    parts = [p.strip() for p in ROUTE_SPLIT_RE.split(str(text or "")) if p.strip()]
+    return parts or None
+
+
 # ---------------------------------------------------------------- 结构校验（F08）
 
 
