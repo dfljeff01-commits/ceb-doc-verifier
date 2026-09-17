@@ -443,6 +443,91 @@ def test_supported_waybill_type_enum_shared():
     assert doc_contract.classify_waybill_type("CIM/SMGS统一运单") == "composite"
 
 
+# ---------------------------------------------------------------- F08：API 请求契约（ASGI 直连，修复"结构错误变500"）
+
+
+def _asgi_post(body: dict):
+    """直接以 ASGI 调用 api.app（不依赖 httpx/TestClient），返回 (status, body)。"""
+    import asyncio
+    import json as _json
+
+    import api
+
+    data = _json.dumps(body, ensure_ascii=False).encode("utf-8")
+    messages = []
+    received = False
+
+    async def receive():
+        nonlocal received
+        if not received:
+            received = True
+            return {"type": "http.request", "body": data, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+             "method": "POST", "scheme": "http", "path": "/verify",
+             "raw_path": b"/verify", "query_string": b"",
+             "headers": [(b"content-type", b"application/json"),
+                         (b"content-length", str(len(data)).encode())],
+             "client": ("127.0.0.1", 1), "server": ("test", 80), "root_path": ""}
+
+    async def call():
+        await api.app(scope, receive, send)
+
+    asyncio.run(call())
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    payload = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
+    return start["status"], _json.loads(payload.decode("utf-8")) if payload else {}
+
+
+def test_api_clean_batch_is_200():
+    status, body = _asgi_post({"batch_id": "t", "documents": base_documents()})
+    assert status == 200
+    assert body["summary"]["total"] >= 11
+
+
+def test_api_null_document_returns_422_not_500():
+    """documents=[null]：必须返回 4xx 与可读错误，不是 500（修复前 500）。"""
+    status, body = _asgi_post({"documents": [None]})
+    assert 400 <= status < 500 and status != 500
+    assert "documents" in _json_dumps(body)
+
+
+def test_api_invalid_fields_type_returns_422_not_500():
+    """fields="bad"：必须返回 4xx 且指明 fields 字段问题（修复前 500）。"""
+    status, body = _asgi_post({"documents": [{"doc_type": "invoice", "fields": "bad"}]})
+    assert 400 <= status < 500
+    assert "fields" in _json_dumps(body)
+
+
+def test_api_missing_documents_returns_422():
+    status, _ = _asgi_post({"batch_id": "x"})
+    assert status == 422
+
+
+def test_api_empty_documents_returns_422():
+    status, _ = _asgi_post({"documents": []})
+    assert status == 422
+
+
+def test_api_weight_with_unit_no_500():
+    """"看起来正常但格式错误"的基准字段（12300kg）经 API：返回待复核而非异常。"""
+    batch = {"documents": base_documents()}
+    edit(batch["documents"], "invoice", "gross_weight_kg", "12300kg")
+    status, body = _asgi_post(batch)
+    assert status == 200
+    r = next(x for x in body["results"] if x["check_id"] == "CONS-003")
+    assert r["status"] == STATUS_WARNING
+
+
+def _json_dumps(obj) -> str:
+    import json as _json
+    return _json.dumps(obj, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------- 输入结构契约（F08 引擎侧）
 
 
