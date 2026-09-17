@@ -420,14 +420,17 @@ def process_image(data: bytes, filename: str) -> IngestResult:
 
 
 def build_batch(results: list) -> dict:
-    """把多个摄取结果组装成核验引擎的批次。"""
+    """把多个摄取结果组装成核验引擎的批次。
+    batch_id 由单证内容哈希派生（修复 F09：固定 batch_id 会让邮件/对话等
+    按 batch_id 关联的材料在换文件后仍复用旧数据）。"""
     documents = []
     for r in results:
         if r.error:
             continue
         documents.append(r.to_document())
+    dv = doc_contract.data_version(documents)
     return {
-        "batch_id": "pdf_upload",
+        "batch_id": f"pdf_upload_{dv}",
         "batch_name": "上传PDF识别批次",
         "description": "由上传的PDF单证经判型/OCR/字段解析后组装（可在预览表中人工修正）。",
         "destination_summary": "—",

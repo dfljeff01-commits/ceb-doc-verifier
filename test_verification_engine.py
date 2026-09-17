@@ -443,6 +443,19 @@ def test_supported_waybill_type_enum_shared():
     assert doc_contract.classify_waybill_type("CIM/SMGS统一运单") == "composite"
 
 
+def test_data_version_changes_on_any_edit():
+    """数据版本=内容哈希（F09）：任何字段编辑/增删都改变版本，深拷贝不变。"""
+    docs = base_documents()
+    dv1 = doc_contract.data_version(docs)
+    assert doc_contract.data_version(copy.deepcopy(docs)) == dv1
+    docs2 = copy.deepcopy(docs)
+    edit(docs2, "invoice", "total_packages", 481)
+    assert doc_contract.data_version(docs2) != dv1
+    docs3 = copy.deepcopy(docs)
+    next(d for d in docs3 if d["doc_type"] == "invoice")["fields"]["currency"] = "EUR"
+    assert doc_contract.data_version(docs3) != dv1
+
+
 # ---------------------------------------------------------------- F08：API 请求契约（ASGI 直连，修复"结构错误变500"）
 
 

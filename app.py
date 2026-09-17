@@ -7,6 +7,7 @@
         -> 页面展示（汇总卡片 / 明细表格 / AI修正建议 / PDF导出 / 手动编辑实时复核）
 """
 
+import hashlib
 import io
 import llm_layer
 import json
@@ -294,20 +295,29 @@ def render_kb_basis(results: list) -> None:
 
 
 def render_email_generator(verification: dict, documents: list) -> None:
-    """AI整改邮件（原生AI功能2）：LLM实时生成，无Key时降级为数据填充的结构化草稿。"""
+    """AI整改邮件（原生AI功能2）：LLM实时生成，无Key时降级为数据填充的结构化草稿。
+    缓存按数据版本（内容哈希）关联——字段编辑/换文件后旧草稿失效，需重新生成（修复 F09）。"""
     st.subheader("📧 整改邮件（AI代拟给供应商/货代）")
     problems = [r for r in verification["results"] if r["status"] != STATUS_PASS]
     if not problems:
         st.success("本批次全部检查通过，无需生成整改邮件。")
         return
 
-    cache_key = f"email::{verification.get('batch_id')}"
+    batch_id = str(verification.get("batch_id"))
+    dv = doc_contract.data_version(documents)
+    cache_key = f"email::{batch_id}::{dv}"
+    generated_dv = st.session_state.get(f"email_generated_dv::{batch_id}")
+    if generated_dv is not None and generated_dv != dv:
+        st.warning("⚠️ 单证数据已变化（字段被编辑或文件已更换），此前生成的邮件基于旧数据，"
+                   "请点击下方按钮重新生成。")
     if st.button("✉️ 生成中英双语整改邮件草稿", type="primary"):
         with st.spinner("AI正在起草邮件…"):
             st.session_state[cache_key] = email_generator.generate_email(verification, documents)
+            st.session_state[f"email_generated_dv::{batch_id}"] = dv
     result = st.session_state.get(cache_key)
     if not result:
-        st.caption("草稿基于本批次真实的 FAIL/WARNING 明细生成；生成后可直接编辑文本。")
+        st.caption("草稿基于本批次真实的 FAIL/WARNING 明细生成；生成后可直接编辑文本，"
+                   "下载内容为编辑后的最新文本。")
         return
 
     if result["mode"] == "not_needed":
@@ -316,24 +326,28 @@ def render_email_generator(verification: dict, documents: list) -> None:
     mode_badge = {"live": "🟢 LLM实时生成",
                   "offline_template": "📦 离线模板模式：草稿由本批次核验明细数据填充生成，"
                                       "配置 API Key 后由LLM生成完整商务邮件"}.get(result["mode"], result["mode"])
-    st.caption(f"生成方式：{mode_badge}　|　发送前请人工审阅编辑")
+    st.caption(f"生成方式：{mode_badge}　|　数据版本 {dv}　|　发送前请人工审阅编辑")
     tab_zh, tab_en = st.tabs(["中文版", "English"])
     with tab_zh:
-        st.text_area("邮件草稿（可编辑）", value=result["zh"], height=380, key=f"{cache_key}::zh")
-        st.download_button("下载中文版 (.txt)", data=result["zh"].encode("utf-8"),
-                           file_name="整改邮件_中文.txt", width="stretch")
+        # 下载读取当前编辑后的实际内容（修复 F09：下载不再使用缓存的原始文本）
+        zh_text = st.text_area("邮件草稿（可编辑）", value=result["zh"], height=380,
+                               key=f"{cache_key}::zh")
+        st.download_button("下载中文版 (.txt)", data=zh_text.encode("utf-8"),
+                           file_name=f"整改邮件_中文_{dv}.txt", width="stretch")
     with tab_en:
-        en_text = result.get("en") or "（English version unavailable）"
-        st.text_area("Email draft (editable)", value=en_text, height=380, key=f"{cache_key}::en")
+        en_source = result.get("en") or "（English version unavailable）"
+        en_text = st.text_area("Email draft (editable)", value=en_source, height=380,
+                               key=f"{cache_key}::en")
         st.download_button("Download English (.txt)", data=en_text.encode("utf-8"),
-                           file_name="remediation_email_en.txt", width="stretch")
+                           file_name=f"remediation_email_en_{dv}.txt", width="stretch")
 
 
 def render_chat_assistant(verification: dict, documents: list) -> None:
-    """对话式核验助手（原生AI功能1）：LLM+工具调用，数值假设会真实重跑风险模型。"""
+    """对话式核验助手（原生AI功能1）：LLM+工具调用，数值假设会真实重跑风险模型。
+    会话按数据版本关联——字段编辑/换文件后旧对话不带入新数据，并明确提示（修复 F09）。"""
     st.subheader("💬 向AI追问（对话式核验助手）")
     st.caption("ℹ️ 回答由AI实时生成，可能存在误差，请以核验报告明细为准。"
-               "数值假设类问题会调用核验引擎真实重算，不是模型猜测。")
+               "数值假设类问题会调用核验引擎真实重算并经计算验证，不是模型猜测。")
 
     if resolve_endpoint() is None:
         st.info("⚠️ 对话式核验助手需配置 LLM API Key 启用（环境变量 ARK_API_KEY，"
@@ -341,7 +355,14 @@ def render_chat_assistant(verification: dict, documents: list) -> None:
                 icon="🔑")
         return
 
-    hist_key = f"chat::{verification.get('batch_id')}"
+    batch_id = str(verification.get("batch_id"))
+    dv = doc_contract.data_version(documents)
+    hist_key = f"chat::{batch_id}::{dv}"
+    prev_dv = st.session_state.get(f"chat_dv::{batch_id}")
+    if prev_dv is not None and prev_dv != dv and st.session_state.get(f"chat::{batch_id}::{prev_dv}"):
+        st.warning("⚠️ 单证数据已变化（字段被编辑或文件已更换），此前对话基于旧数据；"
+                   "以下为新数据的全新会话，重要结论请重新提问核对。")
+    st.session_state[f"chat_dv::{batch_id}"] = dv
     history = st.session_state.setdefault(hist_key, [])
     for msg in history:
         with st.chat_message(msg["role"]):
@@ -382,6 +403,10 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     FONT = "STSong-Light"
 
+    # 数据版本+规则版本入报告（F09/F07：导出材料可追溯到当前数据与规则口径）
+    dv = doc_contract.data_version(documents) if documents else "-"
+    rule_version = verification.get("rule_version", "")
+
     title_style = ParagraphStyle("t", fontName=FONT, fontSize=16, leading=22, spaceAfter=4)
     normal_style = ParagraphStyle("n", fontName=FONT, fontSize=9.5, leading=14)
     small_style = ParagraphStyle("s", fontName=FONT, fontSize=8, leading=12,
@@ -397,7 +422,9 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
         Paragraph(f"批次：{verification['batch_name']}　|　"
                   f"路径：{batch.get('destination_summary', '—')}　|　"
                   f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                  + (f"　|　⚠️ 含手动修改字段 {edited_count} 处" if edited_count else ""),
+                  + (f"　|　⚠️ 含手动修改字段 {edited_count} 处" if edited_count else "")
+                  + f"　|　数据版本 {dv}"
+                  + (f"　|　规则版本 {rule_version}" if rule_version else ""),
                   normal_style),
         Spacer(1, 6),
         Paragraph(f"背景：{SCENE_SENTENCE}", small_style),
@@ -587,7 +614,18 @@ st.info(SCENE_SENTENCE, icon="🎯")
 
 
 def _file_sig(up_file) -> str:
-    return f"{up_file.name}:{up_file.size}"
+    """上传文件签名（修复 F09）：文件名 + 内容SHA256。
+    同名同大小但内容不同的文件签名不同，不会误命中旧解析缓存。"""
+    data = None
+    getter = getattr(up_file, "getvalue", None)
+    if callable(getter):
+        try:
+            data = getter()
+        except Exception:
+            data = None
+    if data is not None:
+        return f"{up_file.name}:{hashlib.sha256(data).hexdigest()[:16]}"
+    return f"{up_file.name}:{getattr(up_file, 'size', '?')}"
 
 
 def ingest_uploaded_files(uploads: list) -> list:

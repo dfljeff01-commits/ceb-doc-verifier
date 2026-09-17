@@ -197,3 +197,149 @@ def test_retrieve_returns_sorted_scores():
 
 def test_kb_disclaimer_exists():
     assert "演示" in knowledge_base.KB_DISCLAIMER
+
+
+# ---------------------------------------------------------------- F09：内容哈希缓存与数据版本
+
+
+class _Ctx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeSt:
+    """最小Streamlit打桩：验证 render_email_generator 的下载/失效行为（AST提取执行）。"""
+
+    def __init__(self, session_state, edited_text):
+        self.session_state = session_state
+        self.edited_text = edited_text
+        self.downloads = []
+        self.warnings = []
+
+    def subheader(self, *a, **k):
+        pass
+
+    def success(self, *a, **k):
+        pass
+
+    def warning(self, msg, *a, **k):
+        self.warnings.append(str(msg))
+
+    def caption(self, *a, **k):
+        pass
+
+    def button(self, *a, **k):
+        return False
+
+    def spinner(self, *a, **k):
+        return _Ctx()
+
+    def tabs(self, *a, **k):
+        return [_Ctx(), _Ctx()]
+
+    def text_area(self, label, value="", **k):
+        return self.edited_text          # 模拟用户已编辑
+
+    def download_button(self, label, data, **k):
+        self.downloads.append(data.decode("utf-8"))
+
+
+def _load_render_email_generator(fake_st):
+    """AST提取 app.py 的 render_email_generator（app.py 无法整体import——含页面脚本）。"""
+    import ast
+
+    import doc_contract
+
+    src = (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    funcs, assigns = [], []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "render_email_generator":
+            node.decorator_list = []
+            funcs.append(node)
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "_WAYBILL_UNSET" for t in node.targets):
+            assigns.append(node)
+    ns = {"st": fake_st, "doc_contract": doc_contract,
+          "email_generator": email_generator, "STATUS_PASS": "PASS",
+          "STATUS_FAIL": "FAIL", "STATUS_WARNING": "WARNING",
+          "_WAYBILL_UNSET": "（不设置/留空）"}
+    exec(compile(ast.Module(body=assigns + funcs, type_ignores=[]), "app_f09", "exec"), ns)
+    return ns["render_email_generator"]
+
+
+def _batch(doc_id_seed="I1"):
+    return {"batch_id": "review", "documents": [
+        {"doc_type": "invoice", "doc_id": doc_id_seed,
+         "fields": {"invoice_no": doc_id_seed, "total_amount": 1}}], }
+
+
+def _verification():
+    return {"batch_id": "review", "results": [
+        {"check_id": "CONS-002", "check_name": "件数一致性", "status": "FAIL",
+         "detail": "件数不一致", "suggestion": "请核对件数"}]}
+
+
+def test_email_download_uses_current_edited_text():
+    """编辑核验结果/邮件文本后下载：下载内容必须是编辑后的文本（修复前是原始文本）。"""
+    import doc_contract
+    docs = _batch()["documents"]
+    dv = doc_contract.data_version(docs)
+    state = {f"email::review::{dv}": {"mode": "offline_template", "zh": "原始中文草稿",
+                                      "en": "original draft"}}
+    fake = _FakeSt(state, "用户编辑后的文本")
+    render = _load_render_email_generator(fake)
+    render(_verification(), docs)
+    assert fake.downloads, "未触发下载"
+    assert all(d == "用户编辑后的文本" for d in fake.downloads)
+    assert "原始中文草稿" not in fake.downloads[0]
+
+
+def test_email_cache_invalidated_when_data_changes():
+    """修改字段后数据版本变化：旧邮件缓存失效并提示重新生成，不再展示旧草稿。"""
+    import doc_contract
+    docs_old = _batch()["documents"]
+    dv_old = doc_contract.data_version(docs_old)
+    state = {f"email::review::{dv_old}": {"mode": "offline_template", "zh": "旧草稿",
+                                          "en": "old"},
+             "email_generated_dv::review": dv_old}
+    docs_new = _batch()["documents"]
+    next(d for d in docs_new)["fields"]["total_packages"] = 481
+    fake = _FakeSt(state, "任何文本")
+    render = _load_render_email_generator(fake)
+    render(_verification(), docs_new)
+    assert fake.warnings and "数据已变化" in fake.warnings[0]
+    assert fake.downloads == []          # 旧草稿不得被继续下载
+
+
+def test_upload_cache_signature_uses_content_hash():
+    """上传缓存签名=文件名+内容SHA256：同名同大小不同内容不再误命中旧解析（修复前）。"""
+    import ast
+    import hashlib
+
+    src = (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    funcs = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_file_sig":
+            node.decorator_list = []
+            funcs.append(node)
+    ns = {"hashlib": hashlib}
+    exec(compile(ast.Module(body=funcs, type_ignores=[]), "app_f09_sig", "exec"), ns)
+    sig = ns["_file_sig"]
+
+    class _Up:
+        def __init__(self, name, data):
+            self.name, self._data, self.size = name, data, len(data)
+
+        def getvalue(self):
+            return self._data
+
+    a = _Up("invoice.pdf", b"AAAA-content-v1")
+    b = _Up("invoice.pdf", b"AAAA-content-v2")      # 同名同大小，内容不同
+    c = _Up("invoice.pdf", b"AAAA-content-v1")
+    assert sig(a) != sig(b)
+    assert sig(a) == sig(c)
