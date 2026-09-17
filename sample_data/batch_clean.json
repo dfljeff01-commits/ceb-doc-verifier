@@ -1,0 +1,100 @@
+{
+  "batch_id": "batch_clean",
+  "batch_name": "示例批次A：全部通过（干净数据）",
+  "description": "陶瓷卫浴洁具发往德国杜伊斯堡（经阿拉山口-哈萨克斯坦-俄罗斯-白俄罗斯-波兰）。全套单证字段一致、单证齐全，用于验证系统不误报。",
+  "destination_summary": "西安 → 杜伊斯堡（中欧班列北通道）",
+  "documents": [
+    {
+      "doc_type": "invoice",
+      "doc_id": "INV-2026-0908-001",
+      "title": "商业发票 Commercial Invoice",
+      "fields": {
+        "invoice_no": "INV-2026-0908-001",
+        "invoice_date": "2026-09-06",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "package_type": "纸箱",
+        "net_weight_kg": 10800,
+        "gross_weight_kg": 12300,
+        "total_amount": 86400.00,
+        "currency": "USD",
+        "incoterm": "CIF 杜伊斯堡"
+      }
+    },
+    {
+      "doc_type": "packing_list",
+      "doc_id": "PL-2026-0908-001",
+      "title": "装箱单 Packing List",
+      "fields": {
+        "packing_list_no": "PL-2026-0908-001",
+        "packing_list_date": "2026-09-06",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "package_type": "纸箱",
+        "net_weight_kg": 10800,
+        "gross_weight_kg": 12300,
+        "container_no": "MSKU8765432"
+      }
+    },
+    {
+      "doc_type": "railway_waybill",
+      "doc_id": "SMU-512301-2026",
+      "title": "国际铁路运单 Railway Consignment Note",
+      "fields": {
+        "waybill_no": "SMU/512301/2026",
+        "waybill_date": "2026-09-08",
+        "waybill_type": "SMGS国际货协运单",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "departure_station": "中国 西安新筑站",
+        "destination_station": "德国 杜伊斯堡 DIT场站",
+        "route_countries": ["中国", "哈萨克斯坦", "俄罗斯", "白俄罗斯", "波兰", "德国"],
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "gross_weight_kg": 12300,
+        "container_no": "MSKU8765432",
+        "wagon_no": "GW0418726"
+      }
+    },
+    {
+      "doc_type": "export_customs_declaration",
+      "doc_id": "DEC-29152026000118888",
+      "title": "出口报关单 Export Customs Declaration",
+      "fields": {
+        "declaration_no": "29152026000118888",
+        "declaration_date": "2026-09-07",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "net_weight_kg": 10800,
+        "gross_weight_kg": 12300,
+        "declared_value": 86400.00,
+        "currency": "USD",
+        "waybill_no": "SMU/512301/2026",
+        "container_no": "MSKU8765432",
+        "departure_country": "中国",
+        "destination_country": "德国"
+      }
+    },
+    {
+      "doc_type": "certificate_of_origin",
+      "doc_id": "COO-CCPIT-2026-091201",
+      "title": "原产地证书 Certificate of Origin",
+      "fields": {
+        "co_no": "CCPIT-2026-091201",
+        "issue_date": "2026-09-05",
+        "issuer": "中国国际贸易促进委员会（CCPIT）",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "origin_country": "中国"
+      }
+    }
+  ]
+}

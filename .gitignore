@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.log
+
+# 密钥只放环境变量/.env（.env已被忽略），防止误提交
+*.key
+
+# Flutter / Android 构建产物
+mobile_app/build/
+mobile_app/.dart_tool/
+mobile_app/.flutter-plugins*
+mobile_app/android/.gradle/
+*.apk
+*.sha1
+
+# 演示运行时产物
+drill_*.png
+drill_*.pdf
+streamlit_run.log
+api_run.log
+
+# OS
+Thumbs.db
+.DS_Store

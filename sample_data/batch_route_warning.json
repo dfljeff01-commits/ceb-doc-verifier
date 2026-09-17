@@ -1,0 +1,100 @@
+{
+  "batch_id": "batch_route_warning",
+  "batch_name": "示例批次C：路线合规告警（SMGS运单+土耳其线路）",
+  "description": "发往土耳其伊斯坦布尔（中间走廊BTK线路），但使用了SMGS国际货协运单。SMGS运单不覆盖土耳其段，触发路线合规WARNING；其余字段均一致。",
+  "destination_summary": "西安 → 伊斯坦布尔（中间走廊BTK线路）",
+  "documents": [
+    {
+      "doc_type": "invoice",
+      "doc_id": "INV-2026-0915-001",
+      "title": "商业发票 Commercial Invoice",
+      "fields": {
+        "invoice_no": "INV-2026-0915-001",
+        "invoice_date": "2026-09-13",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 320,
+        "package_type": "纸箱",
+        "net_weight_kg": 7200,
+        "gross_weight_kg": 8200,
+        "total_amount": 57600.00,
+        "currency": "USD",
+        "incoterm": "CIF 伊斯坦布尔"
+      }
+    },
+    {
+      "doc_type": "packing_list",
+      "doc_id": "PL-2026-0915-001",
+      "title": "装箱单 Packing List",
+      "fields": {
+        "packing_list_no": "PL-2026-0915-001",
+        "packing_list_date": "2026-09-13",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 320,
+        "package_type": "纸箱",
+        "net_weight_kg": 7200,
+        "gross_weight_kg": 8200,
+        "container_no": "OOLU2468101"
+      }
+    },
+    {
+      "doc_type": "railway_waybill",
+      "doc_id": "SMU-780112-2026",
+      "title": "国际铁路运单 Railway Consignment Note",
+      "fields": {
+        "waybill_no": "SMU/780112/2026",
+        "waybill_date": "2026-09-15",
+        "waybill_type": "SMGS国际货协运单",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "departure_station": "中国 西安新筑站",
+        "destination_station": "土耳其 伊斯坦布尔 Halkalı站",
+        "route_countries": ["中国", "哈萨克斯坦", "阿塞拜疆", "格鲁吉亚", "土耳其"],
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 320,
+        "gross_weight_kg": 8200,
+        "container_no": "OOLU2468101",
+        "wagon_no": "GW0422988"
+      }
+    },
+    {
+      "doc_type": "export_customs_declaration",
+      "doc_id": "DEC-29152026000135210",
+      "title": "出口报关单 Export Customs Declaration",
+      "fields": {
+        "declaration_no": "29152026000135210",
+        "declaration_date": "2026-09-14",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 320,
+        "net_weight_kg": 7200,
+        "gross_weight_kg": 8200,
+        "declared_value": 57600.00,
+        "currency": "USD",
+        "waybill_no": "SMU/780112/2026",
+        "container_no": "OOLU2468101",
+        "departure_country": "中国",
+        "destination_country": "土耳其"
+      }
+    },
+    {
+      "doc_type": "certificate_of_origin",
+      "doc_id": "COO-CCPIT-2026-091502",
+      "title": "原产地证书 Certificate of Origin",
+      "fields": {
+        "co_no": "CCPIT-2026-091502",
+        "issue_date": "2026-09-12",
+        "issuer": "中国国际贸易促进委员会（CCPIT）",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 320,
+        "origin_country": "中国"
+      }
+    }
+  ]
+}

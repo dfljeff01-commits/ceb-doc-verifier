@@ -1,0 +1,788 @@
+{
+  "runtime": "C:\\Users\\Jeff0\\.zcode\\workspace\\default\\ceb_doc_verifier\\.venv\\Scripts\\python.exe",
+  "python": "3.12.10",
+  "ocr_available": false,
+  "cases": [
+    {
+      "name": "clean_baseline",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "invoice_weight_0",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "invoice_weight_-1",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "invoice_weight_NaN",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "invoice_weight_12300kg",
+      "observed": {
+        "exception": "TypeError",
+        "message": "unsupported format string passed to NoneType.__format__"
+      }
+    },
+    {
+      "name": "zero_invoice_amount",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "different_currency",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "empty_packing_list_fields",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "empty_certificate_of_origin_fields",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "numeric_description_similarity",
+      "observed": 1.0
+    },
+    {
+      "name": "numeric_description_mismatch",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "second_inconsistent_customs_document",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "unknown_waybill_type",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "composite_route_outside_internal_coverage",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "mobile_route_before_edit",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 11,
+          "warning": 0,
+          "fail": 0
+        },
+        "risk": {
+          "score": 0,
+          "grade": "low",
+          "grade_label": "低风险",
+          "breakdown": []
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "PASS",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "mobile_route_after_text_edit",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 9,
+          "warning": 1,
+          "fail": 1
+        },
+        "risk": {
+          "score": 35,
+          "grade": "medium",
+          "grade_label": "中风险",
+          "breakdown": [
+            {
+              "check_id": "ROUTE-001",
+              "check_name": "运单类型与线路匹配",
+              "status": "WARNING",
+              "points": 10,
+              "reason": "运单类型与线路匹配"
+            },
+            {
+              "check_id": "ROUTE-002",
+              "check_name": "报关起运/目的国与运单路线核对",
+              "status": "FAIL",
+              "points": 25,
+              "reason": "报关起运/目的国与运单路线核对"
+            }
+          ]
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "PASS",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "WARNING",
+          "ROUTE-002": "FAIL"
+        }
+      }
+    },
+    {
+      "name": "blank_labels",
+      "observed": {
+        "fields": {
+          "invoice_no": "SELLER:",
+          "consignor_name": "BUYER: Demo Buyer",
+          "consignee_name": "Demo Buyer",
+          "total_packages": 480,
+          "gross_weight_kg": 12300,
+          "total_amount": 86400
+        },
+        "confidence": {
+          "invoice_no": "high",
+          "consignor_name": "high",
+          "consignee_name": "high",
+          "goods_description": "missing",
+          "total_packages": "high",
+          "gross_weight_kg": "high",
+          "total_amount": "high"
+        }
+      }
+    },
+    {
+      "name": "units_and_decimal_packages",
+      "observed": {
+        "fields": {
+          "invoice_no": "INV1",
+          "consignor_name": "Demo Seller",
+          "consignee_name": "Demo Buyer",
+          "total_packages": 480,
+          "gross_weight_kg": 12300,
+          "total_amount": 86400
+        },
+        "confidence": {
+          "invoice_no": "high",
+          "consignor_name": "high",
+          "consignee_name": "high",
+          "goods_description": "missing",
+          "total_packages": "high",
+          "gross_weight_kg": "high",
+          "total_amount": "high"
+        }
+      }
+    },
+    {
+      "name": "unrecognized_pdf",
+      "observed": {
+        "doc_type": "unknown",
+        "fields": {},
+        "confidence": {},
+        "needs_review": false,
+        "error": null,
+        "document": {
+          "doc_type": "invoice",
+          "doc_id": "PDF-misc",
+          "title": "上传单证 misc.pdf",
+          "fields": {}
+        }
+      }
+    },
+    {
+      "name": "origin_certificate_pdf",
+      "observed": {
+        "doc_type": "certificate_of_origin",
+        "fields": {},
+        "confidence": {},
+        "needs_review": false,
+        "error": null,
+        "document": {
+          "doc_type": "certificate_of_origin",
+          "doc_id": "PDF-certificate_of_origin",
+          "title": "上传单证 certificate_of_origin.pdf",
+          "fields": {}
+        }
+      }
+    },
+    {
+      "name": "ocr_failed_second_page",
+      "observed": {
+        "page_modes": [
+          "text",
+          "ocr"
+        ],
+        "error": null,
+        "warnings": [
+          "第2页OCR失败（simulated page OCR failure），该页文字未提取；请安装 tesseract-ocr + chi_sim（见README）"
+        ],
+        "needs_review": false,
+        "confidence": {
+          "invoice_no": "high",
+          "consignor_name": "high",
+          "consignee_name": "high",
+          "goods_description": "high",
+          "total_packages": "high",
+          "gross_weight_kg": "high",
+          "total_amount": "high"
+        },
+        "ocr_dependency": "failure stub"
+      }
+    },
+    {
+      "name": "hypothetical_question_without_tool",
+      "observed": {
+        "reply": {
+          "mode": "live",
+          "answer": "风险0，全部通过",
+          "tool_trace": []
+        },
+        "actual_recompute": {
+          "new_risk_score": 95,
+          "new_risk_grade": "高风险",
+          "new_summary": {
+            "total": 11,
+            "pass": 8,
+            "warning": 0,
+            "fail": 3
+          },
+          "score_breakdown": [
+            "必需单证缺失（缺1份） +30",
+            "货物描述一致性 +30",
+            "毛重一致性（容差1%） +35"
+          ],
+          "remaining_issues": [
+            "必需单证齐全性检查[FAIL]: 缺少必需单证：原产地证书（Certificate of Origin）",
+            "货物描述一致性[FAIL]: 货物描述与多数单证不一致（基准「陶瓷卫浴洁具」）：出口报关单 Export Customs Declaration（「卫浴陶瓷制品」，语义相似度 0.55）",
+            "毛重一致性（容差1%）[FAIL]: 毛重超出1%容差：基准为商业发票 Commercial Invoice 12300kg，装箱单 Packing List（12500kg，偏离基准1.63%）"
+          ]
+        },
+        "llm_transport": "stub; no provider request"
+      }
+    },
+    {
+      "name": "api_clean",
+      "observed": {
+        "status": 200,
+        "error": null
+      }
+    },
+    {
+      "name": "api_empty_documents",
+      "observed": {
+        "status": 422,
+        "error": null
+      }
+    },
+    {
+      "name": "api_null_document",
+      "observed": {
+        "status": 500,
+        "error": {
+          "exception": "AttributeError",
+          "message": "'NoneType' object has no attribute 'get'"
+        }
+      }
+    },
+    {
+      "name": "api_invalid_fields_type",
+      "observed": {
+        "status": 500,
+        "error": {
+          "exception": "AttributeError",
+          "message": "'str' object has no attribute 'get'"
+        }
+      }
+    },
+    {
+      "name": "api_invalid_weight",
+      "observed": {
+        "status": 500,
+        "error": {
+          "exception": "TypeError",
+          "message": "unsupported format string passed to NoneType.__format__"
+        }
+      }
+    },
+    {
+      "name": "python_source_syntax_check",
+      "observed": {
+        "files_checked": 24,
+        "errors": [
+          {
+            "file": "serve_apk.py",
+            "line": 20,
+            "message": "unterminated string literal (detected at line 20)"
+          }
+        ]
+      }
+    },
+    {
+      "name": "api_startup_without_multipart_simulation",
+      "observed": {
+        "exit_code": 1,
+        "stdout": "RuntimeError: Form data requires \"python-multipart\" to be installed. \nYou can install \"python-multipart\" with: \n\npip install python-multipart",
+        "stderr": "Form data requires \"python-multipart\" to be installed. \nYou can install \"python-multipart\" with: \n\npip install python-multipart"
+      }
+    },
+    {
+      "name": "evaluation_in_memory",
+      "observed": {
+        "agree": 19,
+        "total": 19,
+        "original_files_overwritten": false
+      }
+    },
+    {
+      "name": "evaluation_label_counterexample_with_coo_True",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 9,
+          "warning": 2,
+          "fail": 0
+        },
+        "risk": {
+          "score": 25,
+          "grade": "medium",
+          "grade_label": "中风险",
+          "breakdown": [
+            {
+              "check_id": "CONS-001",
+              "check_name": "货物描述一致性",
+              "status": "WARNING",
+              "points": 15,
+              "reason": "货物描述一致性"
+            },
+            {
+              "check_id": "ROUTE-001",
+              "check_name": "运单类型与线路匹配",
+              "status": "WARNING",
+              "points": 10,
+              "reason": "运单类型与线路匹配"
+            }
+          ]
+        },
+        "statuses": {
+          "DOC-001": "PASS",
+          "CONS-001": "WARNING",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "WARNING",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "evaluation_label_counterexample_with_coo_False",
+      "observed": {
+        "summary": {
+          "total": 11,
+          "pass": 8,
+          "warning": 2,
+          "fail": 1
+        },
+        "risk": {
+          "score": 55,
+          "grade": "high",
+          "grade_label": "高风险",
+          "breakdown": [
+            {
+              "check_id": "DOC-001",
+              "check_name": "必需单证齐全性检查",
+              "status": "FAIL",
+              "points": 30,
+              "reason": "必需单证缺失（缺1份）"
+            },
+            {
+              "check_id": "CONS-001",
+              "check_name": "货物描述一致性",
+              "status": "WARNING",
+              "points": 15,
+              "reason": "货物描述一致性"
+            },
+            {
+              "check_id": "ROUTE-001",
+              "check_name": "运单类型与线路匹配",
+              "status": "WARNING",
+              "points": 10,
+              "reason": "运单类型与线路匹配"
+            }
+          ]
+        },
+        "statuses": {
+          "DOC-001": "FAIL",
+          "CONS-001": "WARNING",
+          "CONS-002": "PASS",
+          "CONS-003": "PASS",
+          "CONS-004": "PASS",
+          "CONS-005": "PASS",
+          "CONS-006": "PASS",
+          "CONS-007": "PASS",
+          "CONS-008": "PASS",
+          "ROUTE-001": "WARNING",
+          "ROUTE-002": "PASS"
+        }
+      }
+    },
+    {
+      "name": "web_missing_fields_editor",
+      "observed": {
+        "rendered_edit_labels": [],
+        "output_fields": {
+          "invoice_no": "I1"
+        },
+        "source_functions_executed": [
+          "collect_edited_documents",
+          "_doc_title"
+        ],
+        "ui_dependency": "stub"
+      }
+    },
+    {
+      "name": "email_edit_download",
+      "observed": {
+        "text_area_returned": "用户编辑后的文本",
+        "downloaded": [
+          "原始中文",
+          "original English"
+        ],
+        "source_function_executed": "render_email_generator",
+        "ui_dependency": "stub"
+      }
+    },
+    {
+      "name": "upload_cache_same_name_and_size",
+      "observed": {
+        "signature_a": "invoice.pdf:100",
+        "signature_b": "invoice.pdf:100",
+        "content_part_of_cache_key": false
+      }
+    }
+  ]
+}

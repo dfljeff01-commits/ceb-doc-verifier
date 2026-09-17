@@ -1,0 +1,6 @@
+.venv*
+_selftest/
+__pycache__/
+*.log
+api_run.log
+streamlit_run.log

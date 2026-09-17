@@ -1,0 +1,95 @@
+{
+  "batch_id": "eval04_desc_suspect",
+  "batch_name": "eval04_desc_suspect",
+  "description": "报关单品名换序重述（语义存疑0.78）",
+  "ground_truth": "low",
+  "documents": [
+    {
+      "doc_type": "invoice",
+      "doc_id": "INV-EVAL-001",
+      "title": "商业发票 Commercial Invoice",
+      "fields": {
+        "invoice_no": "INV-EVAL-001",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "gross_weight_kg": 12300,
+        "total_amount": 86400.0,
+        "currency": "USD"
+      }
+    },
+    {
+      "doc_type": "packing_list",
+      "doc_id": "PL-EVAL-001",
+      "title": "装箱单 Packing List",
+      "fields": {
+        "packing_list_no": "PL-EVAL-001",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "net_weight_kg": 10800,
+        "container_no": "MSKU8765432",
+        "gross_weight_kg": 12300
+      }
+    },
+    {
+      "doc_type": "railway_waybill",
+      "doc_id": "SMU-EVAL-001",
+      "title": "国际铁路运单 Railway Consignment Note",
+      "fields": {
+        "waybill_no": "SMU/EVAL/2026",
+        "waybill_type": "SMGS国际货协运单",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "departure_station": "中国 西安新筑站",
+        "destination_station": "德国 杜伊斯堡 DIT场站",
+        "route_countries": [
+          "中国",
+          "哈萨克斯坦",
+          "俄罗斯",
+          "白俄罗斯",
+          "波兰",
+          "德国"
+        ],
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "container_no": "MSKU8765432",
+        "gross_weight_kg": 12300
+      }
+    },
+    {
+      "doc_type": "export_customs_declaration",
+      "doc_id": "DEC-EVAL-001",
+      "title": "出口报关单 Export Customs Declaration",
+      "fields": {
+        "declaration_no": "29152026000199999",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "goods_description": "卫浴洁具陶瓷制品",
+        "total_packages": 480,
+        "declared_value": 86400.0,
+        "currency": "USD",
+        "waybill_no": "SMU/EVAL/2026",
+        "container_no": "MSKU8765432",
+        "departure_country": "中国",
+        "destination_country": "德国",
+        "gross_weight_kg": 12300
+      }
+    },
+    {
+      "doc_type": "certificate_of_origin",
+      "doc_id": "COO-EVAL-001",
+      "title": "原产地证书 Certificate of Origin",
+      "fields": {
+        "co_no": "CCPIT-EVAL-001",
+        "issuer": "中国国际贸易促进委员会（CCPIT）",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "RHEINBAU HANDEL GMBH",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480
+      }
+    }
+  ]
+}

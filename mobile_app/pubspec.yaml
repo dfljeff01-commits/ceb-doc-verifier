@@ -1,0 +1,22 @@
+name: ceb_verifier
+description: 中欧班列单证智能核验 Android 演示版（拍照/相册识别 → 字段纠正 → 风险核验）
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  image_picker: ^1.1.0
+  shared_preferences: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

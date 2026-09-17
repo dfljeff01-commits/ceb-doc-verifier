@@ -1,0 +1,52 @@
+=== 中文版 ===
+主题：关于货物单证核验结果的通知及整改要求
+
+尊敬的[供应商/货代名称]：
+
+您好！
+
+首先感谢贵公司一直以来对我司的支持与配合。近日，我司对贵公司提供的货物单证进行了核验，发现存在以下问题，特此通知并要求贵公司予以整改：
+
+1. 缺少必需单证：原产地证书（Certificate of Origin）未提供。
+2. 货物描述一致性：货物描述与多数单证不一致。出口报关单（Export Customs Declaration）显示为“卫浴陶瓷制品”，与基准“陶瓷卫浴洁具”的语义相似度为0.55。
+3. 件数（箱数）一致性：多数单证显示为480件，而出口报关单（Export Customs Declaration）显示为475件。
+4. 毛重一致性（容差1%）：装箱单（Packing List）显示毛重为12500kg，超出商业发票（Commercial Invoice）基准12300kg的1.63%，超出1%容差。
+
+为确保货物顺利出口，请贵公司于2个工作日内完成以下整改并回复确认：
+
+1. 补充提供原产地证书（Certificate of Origin）。
+2. 确认货物描述是否为“陶瓷卫浴洁具”，若不一致，请更正并重新提供相关单证。
+3. 确认件数是否为480件，若不一致，请更正并重新提供相关单证。
+4. 确认毛重是否在1%容差范围内，若超出，请更正并重新提供相关单证。
+
+期待您的回复，并感谢您的配合。
+
+此致
+敬礼！
+
+[发件人姓名/公司]
+
+=== English ===
+Subject: Notification and Rectification Requirements for Verification of Goods Documents
+
+Dear [Supplier/Forwarder Name],
+
+First of all, thank you for your continuous support and cooperation with our company. Recently, we have conducted a verification of the goods documents provided by your company and found the following issues, which we hereby notify and require your rectification:
+
+1. Missing essential document: Certificate of Origin is not provided.
+2. Consistency of goods description: The goods description in the Export Customs Declaration (Export Customs Declaration) is "Sanitary Ceramic Products", which has a semantic similarity of 0.55 to the benchmark "Ceramic Sanitary Fixtures".
+3. Consistency of quantity (number of cartons): Most documents show 480 pieces, while the Export Customs Declaration (Export Customs Declaration) shows 475 pieces.
+4. Consistency of gross weight (tolerance of 1%): The gross weight in the Packing List (Packing List) is 12500kg, which exceeds the benchmark 12300kg in the Commercial Invoice (Commercial Invoice) by 1.63%, beyond the 1% tolerance.
+
+To ensure the smooth export of the goods, please complete the following rectifications and reply for confirmation within 2 working days:
+
+1. Provide the Certificate of Origin (Certificate of Origin) in supplement.
+2. Confirm whether the goods description is "Ceramic Sanitary Fixtures", if not consistent, please correct and resubmit the relevant documents.
+3. Confirm whether the quantity is 480 pieces, if not consistent, please correct and resubmit the relevant documents.
+4. Confirm whether the gross weight is within the 1% tolerance, if beyond, please correct and resubmit the relevant documents.
+
+We look forward to your reply and thank you for your cooperation.
+
+Yours sincerely,
+
+[Sender's Name/Company]

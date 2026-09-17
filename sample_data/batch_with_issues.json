@@ -1,0 +1,85 @@
+{
+  "batch_id": "batch_with_issues",
+  "batch_name": "示例批次B：含4类典型问题",
+  "description": "陶瓷卫浴洁具发往土耳其伊斯坦布尔（中间走廊）。单证中埋有4处问题：货物描述不一致、报关单箱数不符、毛重超差、缺少原产地证书。",
+  "destination_summary": "西安 → 伊斯坦布尔（中欧班列南通道/中间走廊）",
+  "documents": [
+    {
+      "doc_type": "invoice",
+      "doc_id": "INV-2026-0912-001",
+      "title": "商业发票 Commercial Invoice",
+      "fields": {
+        "invoice_no": "INV-2026-0912-001",
+        "invoice_date": "2026-09-10",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "package_type": "纸箱",
+        "net_weight_kg": 10800,
+        "gross_weight_kg": 12300,
+        "total_amount": 86400.00,
+        "currency": "USD",
+        "incoterm": "CIF 伊斯坦布尔"
+      }
+    },
+    {
+      "doc_type": "packing_list",
+      "doc_id": "PL-2026-0912-001",
+      "title": "装箱单 Packing List",
+      "fields": {
+        "packing_list_no": "PL-2026-0912-001",
+        "packing_list_date": "2026-09-10",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "package_type": "纸箱",
+        "net_weight_kg": 10800,
+        "gross_weight_kg": 12500,
+        "container_no": "TCLU1234567"
+      }
+    },
+    {
+      "doc_type": "railway_waybill",
+      "doc_id": "SMU-789456-2026",
+      "title": "国际铁路运单 Railway Consignment Note",
+      "fields": {
+        "waybill_no": "SMU/789456/2026",
+        "waybill_date": "2026-09-12",
+        "waybill_type": "CIM/SMGS统一运单",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "departure_station": "中国 西安新筑站",
+        "destination_station": "土耳其 伊斯坦布尔 Halkalı站",
+        "route_countries": ["中国", "哈萨克斯坦", "阿塞拜疆", "格鲁吉亚", "土耳其"],
+        "goods_description": "陶瓷卫浴洁具",
+        "total_packages": 480,
+        "gross_weight_kg": 12300,
+        "container_no": "TCLU1234567",
+        "wagon_no": "GW0421563"
+      }
+    },
+    {
+      "doc_type": "export_customs_declaration",
+      "doc_id": "DEC-29152026000123456",
+      "title": "出口报关单 Export Customs Declaration",
+      "fields": {
+        "declaration_no": "29152026000123456",
+        "declaration_date": "2026-09-11",
+        "consignor_name": "山西洁康陶瓷制品有限公司",
+        "consignee_name": "ISTANBUL YAPI SANAYI A.S.",
+        "goods_description": "卫浴陶瓷制品",
+        "total_packages": 475,
+        "net_weight_kg": 10800,
+        "gross_weight_kg": 12300,
+        "declared_value": 86400.00,
+        "currency": "USD",
+        "waybill_no": "SMU/789456/2026",
+        "container_no": "TCLU1234567",
+        "departure_country": "中国",
+        "destination_country": "土耳其"
+      }
+    }
+  ]
+}
