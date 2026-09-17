@@ -443,6 +443,23 @@ def test_supported_waybill_type_enum_shared():
     assert doc_contract.classify_waybill_type("CIM/SMGS统一运单") == "composite"
 
 
+def test_web_editable_waybill_options_match_enum():
+    """app.py 编辑下拉的运单类型选项必须与契约枚举一致（AST提取校验，防止漂移）。"""
+    import ast
+    from pathlib import Path
+    src = (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    editable = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "EDITABLE_FIELDS" for t in node.targets):
+            editable = ast.literal_eval(node.value)
+    assert editable is not None
+    select_options = next(extra for key, _label, kind, extra in editable
+                          if key == "waybill_type")
+    assert list(select_options) == doc_contract.SUPPORTED_WAYBILL_TYPES
+
+
 def test_data_version_changes_on_any_edit():
     """数据版本=内容哈希（F09）：任何字段编辑/增删都改变版本，深拷贝不变。"""
     docs = base_documents()

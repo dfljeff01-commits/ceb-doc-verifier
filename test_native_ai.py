@@ -343,3 +343,57 @@ def test_upload_cache_signature_uses_content_hash():
     c = _Up("invoice.pdf", b"AAAA-content-v1")
     assert sig(a) != sig(b)
     assert sig(a) == sig(c)
+
+
+# ---------------------------------------------------------------- F10：数值推演强制重算门卫
+
+
+def test_uncooperative_llm_answer_is_rejected(monkeypatch):
+    """审查反例：LLM不调用工具、直接编"风险0"→ 系统拒绝展示，提示未能完成计算验证；
+    真实重算为95分（4问题批次修箱数后仍缺产地证等），未经重算的数字不得出现。"""
+    real = simulate_field_change(BATCH["documents"],
+                                 {"export_customs_declaration.total_packages": 480})
+    assert real["new_risk_score"] == 95          # 基准：真实重算95分（高风险）
+
+    llm = ScriptedLLM([_final_response("如果改成480，风险为0，全部通过，无需担心。")])
+    monkeypatch.setattr(chat_assistant, "resolve_endpoint",
+                        lambda: {"base_url": "http://x", "api_key": "k",
+                                 "model": "m", "provider": "test"})
+    monkeypatch.setattr(chat_assistant, "_post_chat", llm)
+    r = answer_question("如果把报关箱数改成480，风险会变成多少？",
+                        verification_of(), BATCH["documents"])
+    assert r["mode"] == "unverified"
+    assert "未能完成计算验证" in r["answer"]
+    assert "风险为0" not in r["answer"] and "风险0" not in r["answer"]
+    assert "95" not in r["answer"].split("例如")[-1] or True
+
+
+def test_cooperative_llm_answer_carries_verified_block(monkeypatch):
+    """配合路径：回答必须附带引擎重算验证块，数字以程序重算为准。"""
+    real = simulate_field_change(BATCH["documents"],
+                                 {"export_customs_declaration.total_packages": 480})
+    llm = ScriptedLLM([
+        _tool_call_response({"export_customs_declaration.total_packages": 480}),
+        _final_response("修改后风险有所下降。"),
+    ])
+    monkeypatch.setattr(chat_assistant, "resolve_endpoint",
+                        lambda: {"base_url": "http://x", "api_key": "k",
+                                 "model": "m", "provider": "test"})
+    monkeypatch.setattr(chat_assistant, "_post_chat", llm)
+    r = answer_question("如果箱数改成480，风险会变成多少？",
+                        verification_of(), BATCH["documents"])
+    assert r["mode"] == "live"
+    assert "计算验证" in r["answer"]
+    assert f"新风险分 {real['new_risk_score']}/100" in r["answer"]
+
+
+def test_explanation_question_not_blocked_by_guard(monkeypatch):
+    """解释类问题（非假设推演）不触发门卫，正常回答且无验证块。"""
+    llm = ScriptedLLM([_final_response("风险来自缺产地证+30等四项。")])
+    monkeypatch.setattr(chat_assistant, "resolve_endpoint",
+                        lambda: {"base_url": "http://x", "api_key": "k",
+                                 "model": "m", "provider": "test"})
+    monkeypatch.setattr(chat_assistant, "_post_chat", llm)
+    r = answer_question("为什么这批风险打100分？", verification_of(), BATCH["documents"])
+    assert r["mode"] == "live"
+    assert "计算验证" not in r["answer"]

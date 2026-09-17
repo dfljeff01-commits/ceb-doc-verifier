@@ -17,12 +17,18 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 
 from llm_endpoint import resolve_endpoint
 from verification_engine import run_verification
 
 MAX_TOOL_ROUNDS = 3
 REQUEST_TIMEOUT = 40
+
+# 数值假设类问题的识别（F10）：这类问题的回答必须经过程序强制重算验证
+_HYPOTHETICAL_RE = re.compile(
+    r"(如果|假如|假设|要是|改成|改为|变为|变成|调整成|上调|下调|会怎样|会怎么样|"
+    r"会变成|风险会|会到多少|多少分|推演|simulate)")
 
 TOOLS_SCHEMA = [
     {
@@ -145,13 +151,32 @@ def _post_chat(endpoint: dict, messages: list, tools: list | None = None) -> dic
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _verified_block(tool_trace: list) -> str:
+    """把核验引擎的重算结果组装成权威结论块（F10）：数值回答以程序重算为准，
+    不信任LLM自行报出的数字。"""
+    recalcs = [t for t in tool_trace if t["tool"] == "simulate_field_change"]
+    if not recalcs:
+        return ""
+    last = recalcs[-1]["result"]
+    breakdown = "；".join(last.get("score_breakdown", [])[:3])
+    text = (f"\n\n---\n✅ **计算验证（核验引擎真实重算，非模型生成）**：新风险分 "
+            f"{last['new_risk_score']}/100（{last['new_risk_grade']}），"
+            f"FAIL {last['new_summary']['fail']} 项。")
+    if breakdown:
+        text += f"\n扣分构成：{breakdown}"
+    return text
+
+
 def answer_question(question: str, verification: dict, documents: list,
                     history: list | None = None) -> dict:
     """
     对话式问答主入口。
 
     返回：
-      {mode: "live", answer, tool_trace: [...]}             —— 真实调用LLM（含工具调用轨迹）
+      {mode: "live", answer, tool_trace: [...]}             —— 真实调用LLM（含工具调用轨迹）；
+                                                                数值假设类回答附带引擎重算验证块
+      {mode: "unverified", answer: 拒绝文案}                —— 假设类问题但LLM未触发工具重算：
+                                                                拒绝展示未经验证的数值结论（F10）
       {mode: "no_key", answer: 提示文案}                    —— 未配置API Key的显式降级
       {mode: "error", answer: 错误提示}                     —— 调用失败（网络/限流等）
     """
@@ -163,6 +188,7 @@ def answer_question(question: str, verification: dict, documents: list,
                       "或 GLM_API_KEY/BIGMODEL_API_KEY）。为保证诚实性，本功能不提供预置问答。",
         }
 
+    is_hypothetical = bool(_HYPOTHETICAL_RE.search(question or ""))
     messages = ([{"role": "system", "content": SYSTEM_PROMPT},
                  {"role": "system", "content": build_context(verification, documents)}]
                 + list(history or [])
@@ -174,8 +200,16 @@ def answer_question(question: str, verification: dict, documents: list,
             msg = data["choices"][0]["message"]
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
-                return {"mode": "live", "answer": (msg.get("content") or "").strip(),
-                        "tool_trace": tool_trace}
+                answer = (msg.get("content") or "").strip()
+                if is_hypothetical and not tool_trace:
+                    # F10：假设推演类问题，LLM未调用工具就给出数字 → 拒绝展示
+                    return {"mode": "unverified",
+                            "answer": "⚠️ 未能完成计算验证：本次推演未触发核验引擎真实重算，"
+                                      "系统拒绝呈现未经重算验证的数值结论（模型给出的数字不作为依据）。"
+                                      "请重新提问，例如：『如果报关箱数改成480，风险会变成多少？』",
+                            "tool_trace": []}
+                answer += _verified_block(tool_trace)
+                return {"mode": "live", "answer": answer, "tool_trace": tool_trace}
             messages.append(msg)
             for tc in tool_calls:
                 fn = tc["function"]
@@ -192,9 +226,14 @@ def answer_question(question: str, verification: dict, documents: list,
                 })
         # 工具轮次用尽：强制收尾（不带tools再问一次）
         data = _post_chat(endpoint, messages, tools=None)
-        return {"mode": "live",
-                "answer": (data["choices"][0]["message"]["content"] or "").strip(),
-                "tool_trace": tool_trace}
+        answer = (data["choices"][0]["message"]["content"] or "").strip()
+        if is_hypothetical and not tool_trace:
+            return {"mode": "unverified",
+                    "answer": "⚠️ 未能完成计算验证：本次推演未触发核验引擎真实重算，"
+                              "系统拒绝呈现未经重算验证的数值结论。请换一种问法重试。",
+                    "tool_trace": []}
+        answer += _verified_block(tool_trace)
+        return {"mode": "live", "answer": answer, "tool_trace": tool_trace}
     except Exception as exc:
         return {"mode": "error",
                 "answer": f"⚠️ LLM 调用失败（{type(exc).__name__}: {str(exc)[:120]}）。"

@@ -107,3 +107,90 @@ def test_known_pairs_land_in_expected_bands():
 def test_backend_deterministic():
     a, b = "陶瓷卫浴洁具", "卫浴洁具陶瓷制品"
     assert similarity(a, b) == similarity(a, b)
+
+
+# ---------------------------------------------------------------- F10：标注口径统一与冻结留出集
+
+import hashlib
+import json as _json
+from pathlib import Path as _Path
+
+import evaluation as _evaluation
+from verification_engine import run_verification as _run_v
+
+
+def test_ground_truth_label_rubric():
+    """统一后的标注口径：按FAIL/WARNING计数判定（独立于评分权重）。"""
+    gt = _evaluation.ground_truth_label
+    assert gt(0, 0) == GRADE_LOW
+    assert gt(0, 1) == GRADE_LOW
+    assert gt(0, 2) == GRADE_MEDIUM          # 0 FAIL 但 2 条 WARNING = 中风险（审查反例）
+    assert gt(1, 0) == GRADE_MEDIUM
+    assert gt(1, 1) == GRADE_MEDIUM
+    assert gt(1, 2) == GRADE_HIGH            # 1 FAIL + 2 WARNING = 高风险（审查反例）
+    assert gt(2, 0) == GRADE_HIGH
+    assert gt(3, 5) == GRADE_HIGH
+
+
+def test_frozen_holdout_labels_match_rubric_and_model():
+    """逐一核对冻结留出集：存储标注 = 口径判定 = 模型判定，三方一致（修复前矛盾）。"""
+    cases = _evaluation.load_frozen_holdout()
+    assert len(cases) == 19
+    for c in cases:
+        v = _run_v(c)
+        n_fail, n_warn = v["summary"]["fail"], v["summary"]["warning"]
+        rubric = _evaluation.ground_truth_label(n_fail, n_warn)
+        assert c["ground_truth"] == rubric == v["risk"]["grade"], (
+            f"{c['batch_id']}: stored={c['ground_truth']} rubric={rubric} "
+            f"model={v['risk']['grade']} (FAIL={n_fail}, WARN={n_warn})")
+
+
+def test_review_counterexamples_now_aligned():
+    """审查指出的两个矛盾案例在新口径下对齐：
+    0 FAIL+2 WARNING(25分)→中；1 FAIL+2 WARNING(55分)→高。"""
+    from verification_engine import run_verification
+    turkey = ["中国", "哈萨克斯坦", "阿塞拜疆", "格鲁吉亚", "土耳其"]
+    case1_docs = _evaluation.make_docs(desc_customs="卫浴洁具陶瓷制品", route=turkey)
+    v1 = run_verification({"documents": case1_docs})
+    assert v1["summary"]["fail"] == 0 and v1["summary"]["warning"] == 2
+    assert v1["risk"]["score"] == 25
+    assert _evaluation.ground_truth_label(v1["summary"]["fail"],
+                                          v1["summary"]["warning"]) == "medium"
+    assert v1["risk"]["grade"] == "medium"
+    case2_docs = _evaluation.make_docs(desc_customs="卫浴洁具陶瓷制品", route=turkey,
+                                       with_coo=False)
+    v2 = run_verification({"documents": case2_docs})
+    assert v2["summary"]["fail"] == 1 and v2["summary"]["warning"] == 2
+    assert v2["risk"]["score"] == 55
+    assert _evaluation.ground_truth_label(v2["summary"]["fail"],
+                                          v2["summary"]["warning"]) == "high"
+    assert v2["risk"]["grade"] == "high"
+
+
+def test_evaluation_never_overwrites_frozen_holdout(tmp_path, monkeypatch):
+    """评估运行只读取冻结留出集：前后文件哈希一致，且支持校准集分离生成。"""
+    holdout = _Path(_evaluation.__file__).parent / "evaluation_set"
+    before = {f.name: hashlib.sha256(f.read_bytes()).hexdigest()
+              for f in sorted(holdout.glob("eval*.json"))}
+    assert len(before) == 19
+    # 屏蔽报告写入对断言无影响；main() 正常跑完
+    assert _evaluation.main() == 0
+    after = {f.name: hashlib.sha256(f.read_bytes()).hexdigest()
+             for f in sorted(holdout.glob("eval*.json"))}
+    assert before == after
+    # 校准集生成写独立目录，不触碰留出集
+    monkeypatch.setattr(_evaluation, "CALIB_DIR", tmp_path / "calib")
+    _evaluation.save_cases(_evaluation.build_cases())
+    assert (tmp_path / "calib" / "eval01_clean.json").exists()
+    assert {f.name: hashlib.sha256(f.read_bytes()).hexdigest()
+            for f in sorted(holdout.glob("eval*.json"))} == before
+
+
+def test_evaluation_report_contains_required_metrics():
+    """评估报告必须输出一致率/漏报率/误报率/处理失败率/字段识别率/待复核率。"""
+    _evaluation.main()
+    report = (_Path(_evaluation.__file__).parent / "evaluation_report.md").read_text(
+        encoding="utf-8")
+    for token in ("一致率", "漏报率", "误报率", "处理失败率", "字段识别率", "待复核率",
+                  "冻结留出集", "SHA256"):
+        assert token in report, f"报告缺少指标：{token}"
