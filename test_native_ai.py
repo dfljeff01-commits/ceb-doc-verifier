@@ -397,3 +397,122 @@ def test_explanation_question_not_blocked_by_guard(monkeypatch):
     r = answer_question("为什么这批风险打100分？", verification_of(), BATCH["documents"])
     assert r["mode"] == "live"
     assert "计算验证" not in r["answer"]
+
+
+# ---------------------------------------------------------------- 前端优化回归：编辑器字段保留与误报修复
+
+
+def _load_collect_edited_documents(fake_st):
+    """AST提取 app.py 的 collect_edited_documents（app.py 无法整体import）。"""
+    import ast
+
+    import doc_contract
+
+    src = (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    funcs, assigns, editable = [], [], None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "collect_edited_documents", "_serialize_edited_value", "_value_changed",
+                "_doc_title"):
+            node.decorator_list = []
+            funcs.append(node)
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    if t.id == "_WAYBILL_UNSET":
+                        assigns.append(node)
+                    if t.id == "EDITABLE_FIELDS":
+                        editable = ast.literal_eval(node.value)
+    ns = {"st": fake_st, "doc_contract": doc_contract,
+          "EDITABLE_FIELDS": editable, "_WAYBILL_UNSET": "（不设置/留空）"}
+    exec(compile(ast.Module(body=assigns + funcs, type_ignores=[]), "app_ui", "exec"), ns)
+    return ns["collect_edited_documents"]
+
+
+class _UiFakeSt:
+    def __init__(self):
+        self.texts = {}
+        self.nums = {}
+
+    class _Ctx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def expander(self, *a, **k):
+        return self._Ctx()
+
+    def text_input(self, label, value="", **k):
+        key = k.get("key")
+        return self.texts.get(key, value)
+
+    def number_input(self, label, value=0.0, **k):
+        key = k.get("key")
+        return self.nums.get(key, value)
+
+    def selectbox(self, label, options, index=0, **k):
+        key = k.get("key")
+        i = self.nums.get(key, index)
+        return options[i] if isinstance(i, int) else i
+
+
+def test_editor_preserves_non_editable_fields():
+    """编辑器不得丢弃未暴露为可编辑控件的原始字段（发票号/日期/净重等）。
+    此前重构曾从空dict重建fields导致发票号丢失、DOC-002误报缺编号。"""
+    batch = {"batch_id": "t", "documents": [{
+        "doc_type": "invoice", "doc_id": "INV-1", "title": "商业发票",
+        "fields": {"invoice_no": "INV-1", "invoice_date": "2026-09-06",
+                   "net_weight_kg": 10800, "package_type": "纸箱",
+                   "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
+                   "gross_weight_kg": 12300, "total_amount": 86400.00,
+                   "currency": "USD"}}]}
+    fake = _UiFakeSt()
+    collect = _load_collect_edited_documents(fake)
+    docs, edited = collect(batch)
+    f = docs[0]["fields"]
+    for key in ("invoice_no", "invoice_date", "net_weight_kg", "package_type"):
+        assert key in f, f"非编辑字段被丢弃: {key}"
+    assert f["invoice_no"] == "INV-1"
+    assert edited == 0, f"未做任何编辑却报 {edited} 个字段被修改"
+
+
+def test_editor_integer_weight_no_false_edit():
+    """整数毛重经number_input渲染后仍是int，不得误报"已手动修改"。"""
+    batch = {"batch_id": "t", "documents": [{
+        "doc_type": "packing_list", "doc_id": "PL-1", "title": "装箱单",
+        "fields": {"gross_weight_kg": 12300, "total_packages": 480}}]}
+    fake = _UiFakeSt()
+    collect = _load_collect_edited_documents(fake)
+    docs, edited = collect(batch)
+    # 数值相等（毛重为float控件，数值等价即可）；件数为int契约字段，保持int类型
+    assert float(docs[0]["fields"]["gross_weight_kg"]) == 12300.0
+    assert docs[0]["fields"]["total_packages"] == 480
+    assert isinstance(docs[0]["fields"]["total_packages"], int)
+    assert edited == 0, "整数字段经number_input渲染不得误报已修改"
+
+
+def test_editor_route_edit_keeps_list_and_counts():
+    """编辑经停国家：保持列表类型并计为1处修改；清空字段则显式删除。"""
+    batch = {"batch_id": "t", "documents": [{
+        "doc_type": "railway_waybill", "doc_id": "WB-1", "title": "运单",
+        "fields": {"waybill_no": "SMU/T/2026", "waybill_type": "SMGS国际货协运单",
+                   "route_countries": ["中国", "俄罗斯", "德国"],
+                   "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
+                   "gross_weight_kg": 12300}}]}
+    fake = _UiFakeSt()
+    collect = _load_collect_edited_documents(fake)
+    # 找到 route_countries / gross_weight 的控件key并注入编辑
+    prefix = "fld::t::WB-1::"
+    fake.texts = {prefix + "route_countries": "中国、哈萨克斯坦、俄罗斯、德国"}
+    docs, edited = collect(batch)
+    assert docs[0]["fields"]["route_countries"] == ["中国", "哈萨克斯坦", "俄罗斯", "德国"]
+    assert edited == 1
+    fake2 = _UiFakeSt()
+    collect2 = _load_collect_edited_documents(fake2)
+    fake2.texts = {prefix + "route_countries": ""}
+    docs2, edited2 = collect2(batch)
+    assert "route_countries" not in docs2[0]["fields"]
+    assert edited2 == 1

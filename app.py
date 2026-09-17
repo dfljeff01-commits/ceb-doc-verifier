@@ -77,6 +77,68 @@ STATUS_META = {
     STATUS_FAIL: {"label": "⛔ FAIL", "bg": "#FFEBEE", "fg": "#B71C1C"},
 }
 
+# 风险等级配色（唯一事实来源：评分卡/明细/建议/仪表盘统一引用，P1 配色一致性）
+GRADE_COLORS = {
+    "low": {"fg": "#1B5E20", "bg": "#E8F5E9", "label": "低风险"},
+    "medium": {"fg": "#8D6E00", "bg": "#FFF8E1", "label": "中风险"},
+    "high": {"fg": "#B71C1C", "bg": "#FFEBEE", "label": "高风险"},
+}
+
+# 四步流程（P1 步骤指引）
+FLOW_STEPS = ["选择/上传单证", "核对识别结果", "查看核验报告", "生成整改材料"]
+
+APP_CSS = """
+<style>
+/* 来源选择：radio 卡片化（P0 首屏操作入口） */
+div[data-testid="stRadio"] label {
+    border: 1.5px solid #E5E7EB; border-radius: 12px; padding: 12px 16px;
+    background: #FFFFFF; margin: 2px 0; transition: all .12s ease; cursor: pointer;
+}
+div[data-testid="stRadio"] label:hover { border-color: #94A3B8; }
+div[data-testid="stRadio"] label:has(input:checked) {
+    border: 2px solid #0B5394; background: #EFF6FF;
+}
+/* 来源选择按钮组（与radio等价的备选形态） */
+div[data-testid="stButton"] > button { border-radius: 10px; }
+/* 步骤指示器 */
+.ceb-step { display:flex; gap:6px; margin:2px 0 14px; flex-wrap:wrap; }
+.ceb-step span {
+    display:inline-flex; align-items:center; gap:6px; font-size:12.5px;
+    padding:6px 13px; border-radius:999px; border:1px solid #E5E7EB;
+    color:#6B7280; background:#F9FAFB; font-weight:600;
+}
+.ceb-step span.done { color:#1B5E20; background:#E8F5E9; border-color:#A5D6A7; }
+.ceb-step span.cur { color:#0B5394; background:#EFF6FF; border-color:#0B5394;
+    box-shadow:0 1px 6px #0B539433; }
+/* 问题卡片（FAIL/WARNING） */
+.ceb-problem { border-radius:12px; padding:12px 16px; margin:10px 0;
+    border-left:6px solid; }
+.ceb-problem h4 { margin:0 0 6px 0; font-size:15px; }
+.ceb-problem .d { font-size:13.5px; color:#374151; margin:2px 0; }
+.ceb-problem .s { font-size:13px; color:#374151; background:#FFFFFFCC;
+    border-radius:8px; padding:8px 12px; margin-top:8px; }
+/* 通用小卡片 */
+.ceb-mini { border-radius:10px; padding:10px 14px; text-align:center; }
+.ceb-mini .v { font-size:26px; font-weight:800; line-height:1.2; }
+.ceb-mini .k { font-size:12px; color:#6B7280; font-weight:600; }
+</style>
+"""
+
+
+def render_step_indicator(done_through: int, current: int) -> None:
+    """四步流程指示器（P1）：done_through 及之前的步骤显示为已完成，
+    current 步高亮为当前所在，其余待办。"""
+    spans = []
+    for i, name in enumerate(FLOW_STEPS, start=1):
+        if i <= done_through and i != current:
+            cls, mark = "done", "✓ "
+        elif i == current:
+            cls, mark = "cur", f"{i}. "
+        else:
+            cls, mark = "", f"{i}. "
+        spans.append(f'<span class="{cls}">{mark}{name}</span>')
+    st.markdown(f'<div class="ceb-step">{"".join(spans)}</div>', unsafe_allow_html=True)
+
 # 手动编辑（P1/F05）暴露的字段：key -> (中文名, 控件类型, 附加参数)
 # - 全部字段对每份单证渲染（缺失字段可补齐，不再跳过）；
 # - route_countries 用列表序列化（顿号/逗号分隔），修复手机端"列表变字符串"；
@@ -110,61 +172,78 @@ def load_batch(filename: str) -> dict:
 # ---------------------------------------------------------------- UI 组件
 
 
-def render_risk_dashboard(risk: dict) -> None:
-    """风险评分仪表盘：0-100分数 + 等级色 + 可解释分数构成（升级任务书·方向二）。"""
-    meta = GRADE_META[risk["grade"]]
-    score = risk["score"]
-    # 分数条：三段底色刻度（0-20绿 / 21-50黄 / 51-100红），指针定位到当前分数
-    cells = "".join(
-        f'<div style="flex:1; min-width:170px; border-radius:10px; padding:14px 18px;'
-        f' background:{meta["bg"]}; border:1px solid {meta["color"]}33; border-left:6px solid {meta["color"]};">'
-        f'<div style="font-size:13px; color:#6B7280; font-weight:600;">单证组风险分（0-100）</div>'
-        f'<div style="font-size:34px; line-height:1.2; color:{meta["color"]}; font-weight:700;">{score}'
-        f'<span style="font-size:14px; color:{meta["color"]}; font-weight:600;">　{meta["label"]}</span></div>'
-        f'<div style="margin-top:8px; height:10px; border-radius:5px; background:#E5E7EB; position:relative; overflow:hidden;">'
-        f'<div style="position:absolute; left:0; top:0; bottom:0; width:{score}%;'
-        f' background:{meta["color"]}; border-radius:5px;"></div>'
-        f'<div style="position:absolute; left:20%; top:0; bottom:0; width:2px; background:#ffffff88;"></div>'
-        f'<div style="position:absolute; left:50%; top:0; bottom:0; width:2px; background:#ffffff88;"></div></div>'
-        f'<div style="font-size:11px; color:#9CA3AF; margin-top:4px;">0-20 低 · 21-50 中 · 51-100 高</div>'
-        f'</div>'
-    )
+def render_risk_dashboard(risk: dict, summary: dict | None = None) -> None:
+    """风险评分仪表盘（P0 视觉焦点）：大号环形仪表 + 汇总迷你卡 + 可解释分数构成。
+    配色统一引用 GRADE_COLORS。"""
+    meta = GRADE_COLORS.get(risk["grade"], GRADE_COLORS["low"])
+    color, bg = meta["fg"], meta["bg"]
+    score = int(risk["score"])
+    deg = max(0, min(100, score)) * 3.6
+
+    mini_cards = ""
+    if summary:
+        mini_cards = "".join(
+            f'<div class="ceb-mini" style="flex:1; min-width:110px; background:{m_bg};'
+            f' border:1px solid {m_bd};"><div class="v" style="color:{m_fg};">{m_val}</div>'
+            f'<div class="k">{m_label}</div></div>'
+            for m_label, m_val, m_fg, m_bg, m_bd in [
+                ("总检查项", summary["total"], "#111827", "#F3F4F6", "#E5E7EB"),
+                ("通过 PASS", summary["pass"], "#1B5E20", "#E8F5E9", "#A5D6A7"),
+                ("警告 WARNING", summary["warning"], "#8D6E00", "#FFF8E1", "#FFE082"),
+                ("不合格 FAIL", summary["fail"], "#B71C1C", "#FFEBEE", "#F5B4BD"),
+            ])
+
     chips = "".join(
-        f'<div style="display:flex; justify-content:space-between; gap:8px; padding:4px 10px;'
-        f' margin:3px 0; border-radius:6px; font-size:12.5px; background:#F9FAFB; border:1px solid #E5E7EB;">'
+        f'<div style="display:flex; justify-content:space-between; gap:8px; padding:5px 12px;'
+        f' margin:4px 0; border-radius:8px; font-size:13px; background:#F9FAFB; border:1px solid #E5E7EB;">'
         f'<span>{"🔴" if item["status"]=="FAIL" else "🟡"} {item["reason"]}</span>'
-        f'<span style="font-weight:700; color:#374151;">+{item["points"]}</span></div>'
+        f'<span style="font-weight:800; color:{"#B71C1C" if item["status"]=="FAIL" else "#8D6E00"};">+{item["points"]}</span></div>'
         for item in risk["breakdown"]
-    ) or '<div style="font-size:12.5px; color:#6B7280;">无扣分项，各检查全部通过。</div>'
+    ) or '<div style="font-size:13px; color:#6B7280; padding:4px 0;">无扣分项，各检查全部通过。</div>'
+
     st.markdown(
-        f'<div style="display:flex; gap:12px; margin:4px 0 14px 0; align-items:stretch;">'
-        f'{cells}'
-        f'<div style="flex:1.4; min-width:260px; border-radius:10px; padding:12px 16px;'
-        f' background:#FFFFFF; border:1px solid #E5E7EB;">'
-        f'<div style="font-size:13px; color:#6B7280; font-weight:600; margin-bottom:6px;">分数构成（可解释分解）</div>'
-        f'{chips}</div></div>',
+        f'<div style="display:flex; gap:22px; margin:6px 0 18px; align-items:stretch; flex-wrap:wrap;">'
+        # —— 左：环形仪表（视觉焦点） ——
+        f'<div style="flex:0 0 260px; display:flex; justify-content:center; align-items:center;">'
+        f'<div style="width:248px; height:248px; border-radius:50%;'
+        f' background:conic-gradient({color} {deg}deg, #E9EDF3 {deg}deg);'
+        f' display:flex; align-items:center; justify-content:center;'
+        f' box-shadow:0 4px 18px {color}2E;">'
+        f'<div style="width:192px; height:192px; border-radius:50%; background:#FFFFFF;'
+        f' display:flex; flex-direction:column; align-items:center; justify-content:center;">'
+        f'<div style="font-size:13px; color:#6B7280; font-weight:600;">单证组风险分</div>'
+        f'<div style="font-size:66px; font-weight:800; color:{color}; line-height:1.05;">{score}</div>'
+        f'<div style="font-size:14px; font-weight:700; color:{color}; background:{bg};'
+        f' border:1px solid {color}44; border-radius:999px; padding:2px 14px; margin-top:6px;">{meta["label"]}</div>'
+        f'</div></div></div>'
+        # —— 右：汇总迷你卡 + 分数构成 ——
+        f'<div style="flex:1; min-width:300px; display:flex; flex-direction:column; gap:10px;">'
+        + (f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{mini_cards}</div>' if mini_cards else "")
+        + f'<div style="flex:1; border-radius:12px; padding:12px 16px; background:#FFFFFF;'
+        f' border:1px solid #E5E7EB;">'
+        f'<div style="font-size:13px; color:#6B7280; font-weight:700; margin-bottom:6px;">分数构成（可解释分解）</div>'
+        f'{chips}'
+        f'<div style="font-size:11px; color:#9CA3AF; margin-top:6px;">风险分级：0-20 低 · 21-50 中 · 51-100 高</div>'
+        f'</div></div></div>',
         unsafe_allow_html=True,
     )
 
 
 def render_summary_cards(summary: dict) -> None:
-    cards = [
-        ("总检查项", str(summary["total"]), "#111827", "#F3F4F6", "#E5E7EB"),
-        ("通过 PASS", str(summary["pass"]), "#1B5E20", "#E8F5E9", "#A5D6A7"),
-        ("警告 WARNING", str(summary["warning"]), "#8D6E00", "#FFF8E1", "#FFE082"),
-        ("不合格 FAIL", str(summary["fail"]), "#B71C1C", "#FFEBEE", "#F5B4BD"),
-    ]
-    # 注意：行首不能有缩进，>=4 空格会被 Markdown 解析为代码块导致 HTML 被转义
+    """汇总迷你卡（独立渲染形态；主流程已并入仪表盘，保留供其他入口使用）。"""
     cells = "".join(
-        f'<div style="flex:1; min-width:150px; border-radius:10px; padding:14px 18px;'
-        f' background:{bg}; border:1px solid {bd}; border-left:6px solid {fg};">'
-        f'<div style="font-size:13px; color:#6B7280; font-weight:600;">{label}</div>'
-        f'<div style="font-size:34px; line-height:1.2; color:{fg}; font-weight:700;">{value}</div>'
-        f'</div>'
-        for label, value, fg, bg, bd in cards
+        f'<div class="ceb-mini" style="flex:1; min-width:120px; background:{bg};'
+        f' border:1px solid {bd};"><div class="v" style="color:{fg};">{value}</div>'
+        f'<div class="k">{label}</div></div>'
+        for label, value, fg, bg, bd in [
+            ("总检查项", summary["total"], "#111827", "#F3F4F6", "#E5E7EB"),
+            ("通过 PASS", summary["pass"], "#1B5E20", "#E8F5E9", "#A5D6A7"),
+            ("警告 WARNING", summary["warning"], "#8D6E00", "#FFF8E1", "#FFE082"),
+            ("不合格 FAIL", summary["fail"], "#B71C1C", "#FFEBEE", "#F5B4BD"),
+        ]
     )
     st.markdown(
-        f'<div style="display:flex; gap:12px; margin:4px 0 14px 0;">{cells}</div>',
+        f'<div style="display:flex; gap:10px; margin:0 0 12px; flex-wrap:wrap;">{cells}</div>',
         unsafe_allow_html=True,
     )
 
@@ -206,21 +285,50 @@ def render_detail_table(results: list) -> None:
     )
 
 
-def render_suggestions(results: list) -> None:
-    st.subheader("🛠️ AI 修正建议")
+def render_detail_section(results: list) -> None:
+    """核验明细区（P0）：FAIL/WARNING 以问题卡片默认展开，PASS 项折叠收起，
+    完整明细表保留在二级展开器中——避免用户在一堆绿色PASS里找不到问题。"""
     problems = [r for r in sort_results_by_severity(results) if r["status"] != STATUS_PASS]
-    if not problems:
-        st.success("本批次未发现 FAIL/WARNING 项，无需修正。")
-        return
-    for r in problems:
-        body = f"**{r['check_name']}**　{r['detail']}"
-        if r.get("suggestion"):
-            # 注意：加粗闭合标记后不要紧跟全角标点（**建议：**会因CommonMark规则失效）
-            body += f"\n\n💡 **建议**：{r['suggestion']}"
-        if r["status"] == STATUS_FAIL:
-            st.error(body)
-        else:
-            st.warning(body)
+    passes = [r for r in results if r["status"] == STATUS_PASS]
+
+    st.markdown("###### 核验明细")
+    if problems:
+        st.markdown(
+            f'<span style="font-size:13px;color:#6B7280;">发现 <b style="color:#B71C1C;">'
+            f'{sum(1 for r in problems if r["status"] == STATUS_FAIL)}</b> 项不合格、'
+            f'<b style="color:#8D6E00;">{sum(1 for r in problems if r["status"] == STATUS_WARNING)}'
+            f'</b> 项警告（已展开）；另有 {len(passes)} 项通过已折叠。</span>',
+            unsafe_allow_html=True)
+        for r in problems:
+            meta = STATUS_META[r["status"]]
+            badge = STATUS_META[r["status"]]["label"]
+            rule_note = ""
+            if r.get("rule_version"):
+                rule_note = (f'<div style="font-size:11.5px;color:#9CA3AF;margin-top:6px;">'
+                             f'规则版本：{r["rule_version"]}　|　适用范围见说明</div>')
+            st.markdown(
+                f'<div class="ceb-problem" style="background:{meta["bg"]}; border-color:{meta["fg"]};">'
+                f'<h4 style="color:{meta["fg"]};">{badge}　{r["check_name"]}'
+                f'<span style="font-weight:400;color:#6B7280;font-size:12px;">　·　{r["category"]}</span></h4>'
+                f'<div class="d">{r["detail"]}</div>'
+                + (f'<div class="s">💡 <b>建议</b>：{r["suggestion"]}</div>' if r.get("suggestion") else "")
+                + rule_note +
+                f'</div>',
+                unsafe_allow_html=True)
+    else:
+        st.success(f"本批次 {len(passes)} 项检查全部通过，未发现 FAIL/WARNING 问题。")
+
+    if passes:
+        with st.expander(f"✅ 全部通过项（{len(passes)} 项）——点击展开查看"):
+            rows = [{"检查项": r["check_name"], "类别": r["category"],
+                     "核验说明": r["detail"] or "—"} for r in passes]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                         column_config={
+                             "检查项": st.column_config.Column(width="small"),
+                             "核验说明": st.column_config.Column(width="large"),
+                         })
+    with st.expander("📋 完整核验明细表（含全部状态与涉及单证）", expanded=False):
+        render_detail_table(results)
 
 
 def collect_gray_cases(results: list, documents: list) -> list:
@@ -516,16 +624,27 @@ def _serialize_edited_value(kind: str, text: str):
     return text.strip() or None
 
 
+def _value_changed(new_value, original) -> bool:
+    """编辑改动判定：数值按数值比较（int 12300 与 float 123.0 视为相同，
+    避免 number_input 把整数字段误报"已修改"）；其余按内容比较。"""
+    def _is_num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    if _is_num(new_value) and _is_num(original):
+        return float(new_value) != float(original)
+    return doc_contract.canonical_json(new_value) != doc_contract.canonical_json(original)
+
+
 def collect_edited_documents(batch: dict) -> tuple[list, int]:
     """渲染编辑控件并返回合并后的单证列表 + 修改字段数。
     F05：编辑表单来自契约字段定义——缺失字段也渲染控件（可补齐）；
-    按字段类型序列化（数值保持数值、路线保持字符串列表）。"""
+    按字段类型序列化（数值保持数值、路线保持字符串列表）。
+    未暴露为可编辑字段的原始字段（发票号/日期等）原样保留，不丢失。"""
     batch_id = batch["batch_id"]
     edited = 0
     documents = []
     for doc in batch["documents"]:
         original_fields = dict(doc.get("fields") or {})
-        fields: dict = {}
+        fields = dict(original_fields)          # 保留全部原始字段（含非编辑字段）
         with st.expander(f"📄 {_doc_title(doc)}（{doc.get('doc_id', '')}）"):
             for key, label, kind, extra in EDITABLE_FIELDS:
                 widget_key = f"fld::{batch_id}::{doc['doc_id']}::{key}"
@@ -544,13 +663,15 @@ def collect_edited_documents(batch: dict) -> tuple[list, int]:
                         # 原值不是纯数字（如"12300kg"）：退化为文本框，解析交给引擎口径
                         text = st.text_input(label, value="" if original is None else str(original),
                                              key=widget_key)
-                        parsed, included = _parse_numeric_text(text, kind)
-                        new_value = parsed
+                        new_value = doc_contract.parse_edited_number(text, as_int=(kind == "int"))
+                        included = new_value is not None
                     else:
                         step = extra or 1.0
                         value = st.number_input(label, value=numeric_seed,
                                                 min_value=0.0, step=step, key=widget_key)
-                        new_value = int(value) if kind == "int" else round(float(value), 2)
+                        new_value = value if kind == "float" else round(float(value), 2)
+                        if kind == "int" and float(new_value).is_integer():
+                            new_value = int(new_value)   # 整数字段保持int类型（不产生12300.0）
                         included = has_original or new_value not in (0, 0.0)
                 elif kind == "select":
                     options = list(extra or [])
@@ -579,8 +700,9 @@ def collect_edited_documents(batch: dict) -> tuple[list, int]:
 
                 if included:
                     fields[key] = new_value
-                if doc_contract.canonical_json(fields.get(key)) != doc_contract.canonical_json(
-                        original if has_original else None):
+                elif has_original:
+                    fields.pop(key, None)     # 用户清空该字段 → 显式删除
+                if _value_changed(fields.get(key), original if has_original else None):
                     edited += 1
         documents.append({**doc, "fields": fields})
     return documents, edited
@@ -605,10 +727,74 @@ st.set_page_config(
     page_icon="🚂",
     layout="wide",
 )
+st.markdown(APP_CSS, unsafe_allow_html=True)
 
 st.title("🚂 中欧班列单证智能核验")
 st.caption("AI + 多式联运 · 单证交叉核验工具（竞赛Demo）")
 st.info(SCENE_SENTENCE, icon="🎯")
+
+# ---------------- 第一步：选择单证来源（P0 卡片式入口） ----------------
+SOURCE_SAMPLE = "📁 示例批次（3组预置模拟数据，一键加载，推荐先看）"
+SOURCE_UPLOAD = "📎 上传PDF单证（自动判型/OCR，可人工纠正）"
+source_mode = st.radio(
+    "第一步 · 选择单证来源",
+    [SOURCE_SAMPLE, SOURCE_UPLOAD],
+    index=0,
+    key="source_mode",
+    label_visibility="collapsed",
+    horizontal=True,
+)
+
+# 流程进度（P1 步骤指示：来自会话状态，首屏默认第1步）
+_mode_upload = source_mode.startswith("📎")
+_uploaded = bool(st.session_state.get("pdf_files"))
+_verified = bool(st.session_state.get("pdf_verified"))
+_materials_used = any(
+    k.startswith(("email_generated_dv::", "chat::")) and v
+    for k, v in st.session_state.items())
+if not _mode_upload:
+    _done, _cur = 2, 3
+elif not _uploaded:
+    _done, _cur = 0, 1
+elif not _verified:
+    _done, _cur = 1, 2
+else:
+    _done, _cur = 2, 3
+if _materials_used and _done < 3:
+    _done, _cur = 3, 4
+render_step_indicator(_done, _cur)
+
+batch = None
+if not _mode_upload:
+    labels = [label for _, label in BATCH_FILES]
+    batch_ids = [fn.removesuffix(".json") for fn, _ in BATCH_FILES]
+    # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与演示
+    default_index = (
+        batch_ids.index(st.query_params["batch"])
+        if "batch" in st.query_params and st.query_params["batch"] in batch_ids
+        else 0
+    )
+    chosen_col, desc_col = st.columns([1, 2])
+    with chosen_col:
+        chosen_index = labels.index(
+            st.selectbox("选择示例批次（模拟上传+OCR提取完成）", labels, index=default_index)
+        )
+    with desc_col:
+        batch = load_batch(BATCH_FILES[chosen_index][0])
+        st.markdown(
+            f'<div style="border:1px solid #E5E7EB; border-radius:12px; padding:10px 16px;'
+            f' background:#F9FAFB; font-size:13px; color:#374151;">'
+            f'<b>{batch.get("batch_name", "")}</b>　{batch.get("description", "")}'
+            f'<br><span style="color:#6B7280;">🚉 运输路径：{batch.get("destination_summary", "—")}'
+            f'　|　📎 已提取单证：'
+            f'{"、".join(d.get("title", d.get("doc_type", "")) for d in batch["documents"])}</span></div>',
+            unsafe_allow_html=True)
+else:
+    st.caption("上传发票 / 装箱单 / 铁路运单 / 出口报关单 PDF（最多4份）。"
+               "系统自动判型（文本型直取文字层，扫描页OCR），识别结果可人工纠正后核验。")
+    if not pdf_ingest.ocr_available():
+        st.warning("未检测到本机 tesseract OCR，扫描型PDF将无法识别文字层以外的内容"
+                   "（文本型PDF不受影响）。安装方法见 README。")
 
 
 # ---------------- PDF 上传模式辅助 ----------------
@@ -672,42 +858,22 @@ def ingest_with_type(results: list) -> list:
     return corrected
 
 
-# 侧边栏：单证来源
+# 侧边栏：功能入口与使用指引（P1：入口整理，不再承担来源选择主交互）
 with st.sidebar:
-    st.header("1️⃣ 选择单证来源")
-    source_mode = st.radio("模式", ["📁 示例批次（模拟OCR）", "📎 上传PDF单证"],
-                           label_visibility="collapsed")
-
-    batch = None
-    if source_mode.startswith("📁"):
-        labels = [label for _, label in BATCH_FILES]
-        batch_ids = [fn.removesuffix(".json") for fn, _ in BATCH_FILES]
-        # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与演示
-        default_index = (
-            batch_ids.index(st.query_params["batch"])
-            if "batch" in st.query_params and st.query_params["batch"] in batch_ids
-            else 0
-        )
-        chosen_index = labels.index(
-            st.selectbox("示例批次（模拟上传+OCR提取完成）", labels, index=default_index)
-        )
-        batch = load_batch(BATCH_FILES[chosen_index][0])
-
-        st.divider()
-        st.subheader("批次说明")
-        st.write(batch.get("description", ""))
-        st.caption(f"🚉 运输路径：{batch.get('destination_summary', '—')}")
-        st.caption("📎 已提取单证：" + "、".join(
-            d.get("title", d.get("doc_type", "")) for d in batch["documents"]))
-    else:
-        st.caption("上传发票 / 装箱单 / 铁路运单 / 出口报关单 PDF（最多4份）。"
-                   "系统自动判型（文本型直取文字层，扫描页OCR），识别结果可人工纠正后核验。")
-        if not pdf_ingest.ocr_available():
-            st.warning("未检测到本机 tesseract OCR，扫描型PDF将无法识别文字层以外的内容"
-                       "（文本型PDF不受影响）。安装方法见 README。")
-
+    st.header("🧭 使用指引")
+    st.markdown(
+        "1️⃣ 选择/上传单证　→　2️⃣ 核对识别结果　→　"
+        "3️⃣ 查看核验报告　→　4️⃣ 生成整改材料\n\n"
+        "页面顶部会同步显示当前所在步骤。")
     st.divider()
-    st.caption("Demo 版 v1.3 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同（审查整改后）")
+    st.header("🔗 功能入口")
+    st.markdown(
+        f"- [核验API文档（Swagger）]({API_URL}/docs)\n"
+        f"- [API健康检查]({API_URL}/health)")
+    st.caption("📱 Android App 见项目 mobile_app/INSTALL.md（扫码分发：python serve_apk.py）；"
+               "网页端建议 PC 浏览。")
+    st.divider()
+    st.caption("Demo 版 v1.4 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同（审查整改后）")
 
 # ---------------- 非示例模式的PDF提取区 ----------------
 
@@ -808,13 +974,14 @@ with c2:
 
 # 核验（规则全部来自 verification_engine，本文件只做展示；优先走API，不可用时直连）
 effective_batch = {**batch, "documents": edited_documents}
-verification, verify_mode = run_verification_effective(effective_batch)
+with st.spinner("核验计算中…"):
+    verification, verify_mode = run_verification_effective(effective_batch)
 summary = verification["summary"]
 st.caption("🔌 核验通道：" + (
     f"FastAPI 服务（{API_URL}）—— 前后端分离形态" if verify_mode == "api"
     else "进程内直连（未检测到核验API服务，启动 `uvicorn api:app --port 8000` 可切换为API形态）"))
 
-# 汇总卡片 + 导出按钮（按钮放在小节标题同一行右侧）
+# 核验结果汇总（P0：环形风险仪表为全页视觉焦点；导出按钮放标题行右侧）
 head_left, head_right = st.columns([4, 1])
 with head_left:
     st.subheader("3️⃣ 核验结果汇总")
@@ -829,16 +996,20 @@ with head_right:
         width="stretch",
         type="primary" if summary["fail"] or summary["warning"] else "secondary",
     )
-render_summary_cards(summary)
-render_risk_dashboard(verification["risk"])
+render_risk_dashboard(verification["risk"], summary)
 
-st.markdown("###### 详细核验明细")
-render_detail_table(verification["results"])
-render_suggestions(verification["results"])
+# 核验明细（P0：FAIL/WARNING 默认展开，PASS 折叠）
+render_detail_section(verification["results"])
 render_kb_basis(verification["results"])
 render_ai_reasoning(verification["results"], edited_documents)
+
+# 第四步：生成整改材料（P1 分组导航）
+st.markdown("###### 4️⃣ 生成整改材料")
 render_email_generator(verification, edited_documents)
-render_chat_assistant(verification, edited_documents)
+# 对话助手收进默认折叠的展开器：chat_input 挂载时会自动聚焦并把页面滚到底部，
+# 折叠后首屏保持在顶部；用户点开时再聚焦正合适。
+with st.expander("💬 向AI追问（对话式核验助手）——点击展开", expanded=False):
+    render_chat_assistant(verification, edited_documents)
 
 # 原始单证数据
 with st.expander("🔍 查看原始单证数据（模拟OCR提取结果JSON）"):
