@@ -35,8 +35,10 @@ BACKEND_ST = "sentence-transformers"
 
 
 def _normalize(text: str) -> str:
-    """归一化：仅保留文字与数字（去除中英文标点、空白、符号），并转小写。"""
+    """归一化：仅保留文字与数字（去除中英文标点、空白、符号），并转小写。
+    例外：数字间的小数点用"点"占位保留——"1.5mm"与"15mm"不得归一化成同一串（F03）。"""
     text = str(text or "").lower()
+    text = re.sub(r"(?<=\d)\.(?=\d)", "点", text)
     return re.sub(r"[^\w]+", "", text, flags=re.UNICODE)
 
 
@@ -121,3 +123,75 @@ def grade_similarity(score: float) -> str:
     if score >= THRESHOLD_SUSPECT:
         return "suspect"
     return "mismatch"
+
+
+# ---------------------------------------------------------------- 关键实体守卫（F03）
+#
+# 字符相似度只衡量"字面接近"，会被规格数字抹平（"钢板厚度1.5mm" 与
+# "钢板厚度15mm" 去标点后完全相同 → 相似度1.0）。因此数字+单位规格、
+# 否定词必须独立核对：出现矛盾时无论字符相似度多高都判 mismatch。
+
+_SPEC_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(mm|cm|m|km|kg|g|mg|lb|oz|t|ton|s|h|min|v|mv|kv|w|kw|"
+    r"mah|ah|wh|kwh|hz|pcs|mm2|mm3|m2|m3|l|ml|%)", re.IGNORECASE)
+_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+_NEGATIVE_TOKENS = ("不含", "无", "不带", "非", "禁止",
+                    "without", "non-", "not ", "no ", "free from")
+
+
+def spec_tokens(text: str) -> set:
+    """提取"数字+单位"规格集合；小数点保留（1.5 与 15 是不同规格）。"""
+    tokens = set()
+    for num, unit in _SPEC_RE.findall(str(text or "")):
+        try:
+            tokens.add((float(num), unit.lower()))
+        except ValueError:
+            continue
+    return tokens
+
+
+def bare_numbers(text: str) -> set:
+    """提取全部数字（含无单位数字，如型号/数量）；小数点保留。"""
+    nums = set()
+    for num in _NUM_RE.findall(str(text or "")):
+        try:
+            nums.add(float(num))
+        except ValueError:
+            continue
+    return nums
+
+
+def contradiction(a: str, b: str) -> str | None:
+    """
+    关键实体矛盾检测（F03）。返回矛盾类型描述；无矛盾返回 None。
+      - numeric_spec : 带单位的规格数字不一致（厚度/容量/重量等）
+      - bare_number  : 无单位数字不一致（仅当两段文本都有数字时）
+      - negation     : 否定词有无不一致（"含X" vs "不含X"）
+    """
+    na, nb = str(a or ""), str(b or "")
+    specs_a, specs_b = spec_tokens(na), spec_tokens(nb)
+    if specs_a != specs_b and (specs_a or specs_b):
+        return "numeric_spec"
+    nums_a, nums_b = bare_numbers(na), bare_numbers(nb)
+    if nums_a != nums_b and (nums_a or nums_b):
+        return "bare_number"
+    neg_a = any(tok in na.lower() for tok in _NEGATIVE_TOKENS)
+    neg_b = any(tok in nb.lower() for tok in _NEGATIVE_TOKENS)
+    if neg_a != neg_b:
+        return "negation"
+    return None
+
+
+def compare(a: str, b: str) -> dict:
+    """
+    描述比对统一入口（引擎使用）：字符相似度 + 关键实体守卫。
+    返回 {score, grade, guard}：guard 非 None 时 grade 强制为 mismatch，
+    保证"规格矛盾"不会被高字符相似度放行（修复 F03）。
+    """
+    score = similarity(a, b)
+    guard = contradiction(a, b)
+    if guard:
+        grade = "mismatch"
+    else:
+        grade = grade_similarity(score)
+    return {"score": score, "grade": grade, "guard": guard}

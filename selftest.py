@@ -34,7 +34,8 @@ def main() -> int:
     v = run_verification(load("batch_clean"))
     check("0 项 FAIL", v["summary"]["fail"] == 0)
     check("0 项 WARNING", v["summary"]["warning"] == 0)
-    check("全部 11 项 PASS", v["summary"]["pass"] == v["summary"]["total"] == 11)
+    check("全部 14 项 PASS（含结构/字段完整性/重复单证检查）",
+          v["summary"]["pass"] == v["summary"]["total"] == 14)
 
     # ---- 批次B：精确复现4类问题 ----
     print("== 批次B（含4类问题） ==")

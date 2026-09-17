@@ -19,11 +19,11 @@ def base_documents() -> list:
     """一份字段齐全、彼此一致的最小单证组。"""
     return [
         {"doc_type": "invoice", "doc_id": "INV-T1", "title": "商业发票",
-         "fields": {"consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
+         "fields": {"invoice_no": "INV-T1", "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
                     "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
                     "gross_weight_kg": 12300, "total_amount": 86400.00, "currency": "USD"}},
         {"doc_type": "packing_list", "doc_id": "PL-T1", "title": "装箱单",
-         "fields": {"consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
+         "fields": {"packing_list_no": "PL-T1", "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
                     "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
                     "gross_weight_kg": 12300, "container_no": "MSKU8765432"}},
         {"doc_type": "railway_waybill", "doc_id": "SMU-T1", "title": "铁路运单",
@@ -33,7 +33,7 @@ def base_documents() -> list:
                     "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
                     "gross_weight_kg": 12300, "container_no": "MSKU8765432"}},
         {"doc_type": "export_customs_declaration", "doc_id": "DEC-T1", "title": "出口报关单",
-         "fields": {"consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
+         "fields": {"declaration_no": "DEC-T1", "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
                     "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
                     "gross_weight_kg": 12300, "declared_value": 86400.00,
                     "currency": "USD", "waybill_no": "SMU/T/2026",
@@ -207,3 +207,218 @@ def test_full_pipeline_smoke():
     v = run_on()
     assert {"results", "summary", "risk", "suggestions"} <= set(v.keys())
     assert 0 <= v["risk"]["score"] <= 100
+
+
+# ---------------------------------------------------------------- F01：非法数值基准与币种（审查反例）
+
+
+@pytest.mark.parametrize("bad_weight", [0, -1, "NaN"])
+def test_illegal_invoice_weight_not_pass(bad_weight):
+    """发票毛重 0 / -1 / NaN：不得输出全绿（修复前为 11 PASS、风险 0）。"""
+    v = run_on(lambda docs: edit(docs, "invoice", "gross_weight_kg", bad_weight))
+    r = result_of(v, "CONS-003")
+    assert r["status"] == STATUS_FAIL
+    assert v["summary"]["fail"] >= 1 and v["risk"]["score"] > 0
+
+
+def test_weight_with_unit_string_flags_review_not_crash():
+    """发票毛重 "12300kg"（数字带单位）：核验结果为"待复核"，不触发异常（F08反例）。"""
+    v = run_on(lambda docs: edit(docs, "invoice", "gross_weight_kg", "12300kg"))
+    r = result_of(v, "CONS-003")
+    assert r["status"] == STATUS_WARNING
+    assert "待人工复核" in r["detail"]
+
+
+def test_zero_invoice_amount_is_fail():
+    """发票金额改成 0 而报关金额仍 86400：金额检查必须 FAIL。"""
+    v = run_on(lambda docs: edit(docs, "invoice", "total_amount", 0))
+    assert result_of(v, "CONS-008")["status"] == STATUS_FAIL
+
+
+def test_currency_conflict_is_fail():
+    """报关币种改 EUR、发票保持 USD（数字相同）：币种矛盾必须 FAIL，不得全绿。"""
+    v = run_on(lambda docs: edit(docs, "export_customs_declaration", "currency", "EUR"))
+    r = result_of(v, "CONS-008")
+    assert r["status"] == STATUS_FAIL
+    assert "币种矛盾" in r["detail"]
+
+
+def test_currency_missing_is_warning():
+    """币种缺失：无法证明金额口径一致 → 待复核，不得 PASS。"""
+    def drop_currency(docs):
+        for d in docs:
+            d["fields"].pop("currency", None)
+    v = run_on(drop_currency)
+    assert result_of(v, "CONS-008")["status"] == STATUS_WARNING
+
+
+def test_decimal_packages_flagged_review():
+    """计件数 480.5（F04 反例延续到引擎）：不得静默截断为480，须待复核。"""
+    v = run_on(lambda docs: edit(docs, "packing_list", "total_packages", 480.5))
+    r = result_of(v, "CONS-002")
+    assert r["status"] == STATUS_WARNING
+    assert "待人工复核" in r["detail"]
+
+
+def test_negative_packages_is_fail():
+    v = run_on(lambda docs: edit(docs, "packing_list", "total_packages", -5))
+    assert result_of(v, "CONS-002")["status"] == STATUS_FAIL
+
+
+# ---------------------------------------------------------------- F02：空单证与重复单证
+
+
+@pytest.mark.parametrize("doc_type", ["packing_list", "certificate_of_origin"])
+def test_empty_document_not_all_pass(doc_type):
+    """fields={} 的单证：不得全 PASS、风险 0（修复前为全绿）。"""
+    def empty_fields(docs):
+        next(d for d in docs if d["doc_type"] == doc_type)["fields"] = {}
+    v = run_on(empty_fields)
+    r = result_of(v, "DOC-002")
+    assert r["status"] == STATUS_FAIL
+    assert v["risk"]["score"] > 0
+
+
+def test_second_contradictory_customs_not_all_pass():
+    """追加第二份报关单（金额1、运单号WRONG、运抵国UNKNOWN）：必须非全绿（修复前全绿）。"""
+    def add_second(docs):
+        extra = copy.deepcopy(next(d for d in docs if d["doc_type"] == "export_customs_declaration"))
+        extra["doc_id"] = "SECOND-CUSTOMS"
+        extra["fields"].update(declared_value=1, waybill_no="WRONG", destination_country="UNKNOWN")
+        docs.append(extra)
+    v = run_on(add_second)
+    assert result_of(v, "DOC-003")["status"] == STATUS_FAIL
+    assert v["summary"]["fail"] >= 1 and v["risk"]["score"] > 0
+
+
+def test_duplicate_identical_documents_warns():
+    """同类型完全相同的重复单证：提示去重（WARNING），不静默放行。"""
+    def add_twin(docs):
+        twin = copy.deepcopy(next(d for d in docs if d["doc_type"] == "packing_list"))
+        twin["doc_id"] = "PL-T1-COPY"
+        docs.append(twin)
+    v = run_on(add_twin)
+    r = result_of(v, "DOC-003")
+    assert r["status"] == STATUS_WARNING
+    assert "重复" in r["detail"]
+
+
+# ---------------------------------------------------------------- F03：语义归一化不得抹掉关键规格
+
+
+def test_numeric_spec_contradiction_is_fail():
+    """钢板厚度1.5mm vs 15mm：修复前去标点后相同（相似度1.0、全绿），必须 FAIL。"""
+    import semantic
+    assert semantic.similarity("钢板厚度1.5mm", "钢板厚度15mm") < 1.0
+    cmp = semantic.compare("钢板厚度1.5mm", "钢板厚度15mm")
+    assert cmp["guard"] == "numeric_spec" and cmp["grade"] == "mismatch"
+
+    def set_desc(docs):
+        for d in docs:
+            if "goods_description" in d["fields"]:
+                d["fields"]["goods_description"] = "钢板厚度1.5mm"
+        edit(docs, "export_customs_declaration", "goods_description", "钢板厚度15mm")
+    v = run_on(set_desc)
+    r = result_of(v, "CONS-001")
+    assert r["status"] == STATUS_FAIL
+    assert "关键实体矛盾" in r["detail"]
+
+
+def test_battery_capacity_contradiction_is_fail():
+    """电池容量 5000mAh vs 500mAh：规格数字矛盾必须 FAIL（审查发现的容量反例）。"""
+    def set_desc(docs):
+        for d in docs:
+            if "goods_description" in d["fields"]:
+                d["fields"]["goods_description"] = "锂电池组 5000mAh"
+        edit(docs, "export_customs_declaration", "goods_description", "锂电池组 500mAh")
+    v = run_on(set_desc)
+    r = result_of(v, "CONS-001")
+    assert r["status"] == STATUS_FAIL
+
+
+def test_negation_contradiction_is_fail():
+    """否定词差异（含木质包装 vs 不含木质包装）不得因字面相似被判一致。"""
+    import semantic
+    cmp = semantic.compare("陶瓷卫浴洁具 含木质包装", "陶瓷卫浴洁具 不含木质包装")
+    assert cmp["guard"] == "negation" and cmp["grade"] == "mismatch"
+
+
+def test_benign_restatement_still_suspect():
+    """守卫不误伤：换序重述（无数字/无否定差异）仍按相似度分级走灰色区。"""
+    import semantic
+    cmp = semantic.compare("陶瓷卫浴洁具", "卫浴洁具陶瓷制品")
+    assert cmp["guard"] is None and cmp["grade"] == "suspect"
+
+
+# ---------------------------------------------------------------- F07：运单类型枚举与路线覆盖
+
+
+def test_air_waybill_type_unsupported():
+    """AIR WAYBILL：必须标记"类型不支持/需人工复核"，不得判类型/路线匹配。"""
+    v = run_on(lambda docs: edit(docs, "railway_waybill", "waybill_type", "AIR WAYBILL"))
+    r = result_of(v, "ROUTE-001")
+    assert r["status"] == STATUS_FAIL
+    assert "不在受支持枚举" in r["detail"]
+    assert v["risk"]["score"] > 0
+
+
+def test_route_with_out_of_coverage_country_not_pass():
+    """CIM/SMGS统一运单 + 中国→美国→德国：美国不在覆盖集合，必须触发告警不得全绿。"""
+    def set_route(docs):
+        edit(docs, "railway_waybill", "waybill_type", "CIM/SMGS统一运单")
+        edit(docs, "railway_waybill", "route_countries", ["中国", "美国", "德国"])
+    v = run_on(set_route)
+    r = result_of(v, "ROUTE-001")
+    assert r["status"] in (STATUS_FAIL, STATUS_WARNING)
+    assert "美国" in r["detail"]
+
+
+def test_route_results_carry_rule_version_and_coverage():
+    """每条路线判断结果必须附带规则版本号与覆盖范围说明字段（含WARNING/PASS路径）。"""
+    for modifier in (None,
+                     lambda docs: edit(docs, "railway_waybill", "waybill_type", "AIR WAYBILL"),
+                     lambda docs: edit(docs, "railway_waybill", "route_countries",
+                                       ["中国", "哈萨克斯坦", "阿塞拜疆", "格鲁吉亚", "土耳其"])):
+        v = run_on(modifier)
+        for check_id in ("ROUTE-001", "ROUTE-002"):
+            r = result_of(v, check_id)
+            assert r.get("rule_version"), f"{check_id} 缺少 rule_version"
+            assert r.get("rule_coverage"), f"{check_id} 缺少 rule_coverage"
+            assert "规则版本" in r["detail"] and "适用" in r["detail"]
+
+
+def test_composite_waybill_union_coverage():
+    """统一运单按 SMGS∪CIM 并集判断：经停国分别属于两个集合也应 PASS。"""
+    def set_route(docs):
+        edit(docs, "railway_waybill", "waybill_type", "CIM/SMGS统一运单")
+        edit(docs, "railway_waybill", "route_countries",
+             ["中国", "哈萨克斯坦", "俄罗斯", "波兰", "德国", "法国"])
+    v = run_on(set_route)
+    assert result_of(v, "ROUTE-001")["status"] == STATUS_PASS
+
+
+def test_route_as_string_flags_review_not_crash():
+    """路线被改成字符串（历史移动端缺陷形态）：引擎显式告警，不崩溃不放行。"""
+    v = run_on(lambda docs: edit(docs, "railway_waybill", "route_countries",
+                                 "[中国, 俄罗斯, 德国]"))
+    r = result_of(v, "ROUTE-001")
+    assert r["status"] == STATUS_WARNING
+    assert "格式异常" in r["detail"]
+
+
+def test_unsupported_type_risk_is_medium():
+    """类型不支持为硬错误（FAIL 25分 → 中风险），不允许 0 风险蒙混。"""
+    v = run_on(lambda docs: edit(docs, "railway_waybill", "waybill_type", "AIR WAYBILL"))
+    assert v["risk"]["score"] == 25 and v["risk"]["grade"] == "medium"
+
+
+# ---------------------------------------------------------------- 输入结构契约（F08 引擎侧）
+
+
+def test_structural_garbage_does_not_crash_and_flags():
+    """documents 元素为 None / fields 为字符串：引擎不崩溃，SYS-001 显式 FAIL。"""
+    v = run_verification({"batch_id": "t", "documents": [None]})
+    assert result_of(v, "SYS-001")["status"] == STATUS_FAIL
+    v2 = run_verification({"batch_id": "t", "documents": [
+        {"doc_type": "invoice", "fields": "bad"}]})
+    assert result_of(v2, "SYS-001")["status"] == STATUS_FAIL
