@@ -575,11 +575,12 @@ def ingest_with_type(results: list) -> list:
         chosen = st.session_state.get(f"pdf_type::{r.filename}", r.doc_type)
         if chosen != r.doc_type:
             texts = [p.text for p in r.pages]
-            fields, conf = pdf_ingest.extract_fields(chosen, texts)
+            fields, conf, warnings = pdf_ingest.extract_fields(chosen, texts)
             r2 = pdf_ingest.IngestResult(
                 filename=r.filename, doc_type=chosen, type_score=r.type_score,
                 pages=r.pages, fields=fields, field_confidence=conf,
-                elapsed_seconds=r.elapsed_seconds)
+                elapsed_seconds=r.elapsed_seconds, warnings=warnings,
+                pages_with_ocr_failure=r.pages_with_ocr_failure)
             corrected.append(r2)
         else:
             corrected.append(r)
@@ -650,6 +651,12 @@ if source_mode.startswith("📎"):
             if r.error:
                 st.error(f"解析失败：{r.error}")
                 continue
+            if r.warnings:
+                for w in r.warnings:
+                    st.warning(w)
+            if r.pages_with_ocr_failure:
+                st.error(f"第 {'、'.join(map(str, r.pages_with_ocr_failure))} 页OCR失败，"
+                         f"该页内容缺失，核验结论不可信，请处理后重新上传或人工补齐。")
             tcols = st.columns([2, 1])
             with tcols[0]:
                 st.caption(f"单证类型：自动判断（关键词得分 {r.type_score}）"
@@ -673,13 +680,19 @@ if source_mode.startswith("📎"):
 
             rows = ["| 字段 | 提取值 | 置信度 |", "|---|---|---|"]
             for k, v in sorted(r.field_confidence.items()):
-                mark = "✅ 高（关键词命中）" if v == "high" else "⛔ 提取失败/需人工核对"
+                mark = {"high": "✅ 高（关键词命中）",
+                        "review": "⚠️ 存疑（规则命中但口径待确认）",
+                        "missing": "⛔ 提取失败/需人工核对"}.get(v, v)
                 rows.append(f"| `{k}` | {r.fields.get(k, '—')} | {mark} |")
             st.markdown("\n".join(rows))
             missing = [k for k, v in r.field_confidence.items() if v == "missing"]
+            review = [k for k, v in r.field_confidence.items() if v == "review"]
             if missing:
                 st.warning("以下必需字段未能提取，请稍后在『单证字段』区人工补齐后再核验："
                            + "、".join(missing))
+            if review:
+                st.warning("以下字段提取值口径存疑（单位/格式待确认），请人工复核："
+                           + "、".join(review))
 
     if any(r.error for r in results):
         st.caption("⚠️ 存在解析失败的文件，已自动跳过。")

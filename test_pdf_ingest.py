@@ -89,7 +89,7 @@ def test_doc_type_detection_by_content_and_filename():
 
 
 def test_field_extraction_rules_per_type():
-    fields, conf = extract_fields(
+    fields, conf, _warn = extract_fields(
         "export_customs_declaration",
         ["报关单编号(DECLARATION NO): 29152026000123456",
          "境内发货人(发货人): 山西洁康陶瓷制品有限公司",
@@ -126,3 +126,127 @@ def test_extracted_documents_flow_through_engine():
 
 def test_page_mode_threshold_constant():
     assert TEXT_PAGE_MIN_CHARS == 50
+
+
+# ---------------------------------------------------------------- F04：提取错误与丢页的复核门槛
+
+
+def test_blank_label_does_not_capture_next_line():
+    """空 "INVOICE NO:" 不得抓到下一行 SELLER 值（修复前 invoice_no='Demo Buyer'）。"""
+    text = ("INVOICE NO:\nSELLER:\nBUYER: Demo Buyer\nDESCRIPTION: Ceramic\n"
+            "TOTAL PACKAGES: 480\nGROSS WEIGHT: 12300\nTOTAL AMOUNT: 86400")
+    fields, conf, _ = extract_fields("invoice", [text])
+    assert fields.get("invoice_no") is None
+    assert conf["invoice_no"] == "missing"
+    assert conf["consignor_name"] == "missing"      # 空 SELLER 不得抓 BUYER 行
+    assert fields.get("consignee_name") == "Demo Buyer"
+
+
+def test_weight_with_foreign_unit_flagged_review():
+    """"12,300 LB" 不得静默当成 12300kg：保留原文并标记待复核。"""
+    text = ("INVOICE NO: INV1\nSELLER: S\nBUYER: B\nDESCRIPTION: Ceramic\n"
+            "TOTAL PACKAGES: 480\nGROSS WEIGHT: 12,300 LB\nTOTAL AMOUNT: 86400")
+    fields, conf, warnings = extract_fields("invoice", [text])
+    assert fields.get("gross_weight_kg") == "12,300 LB"     # 不静默转换为数字
+    assert conf["gross_weight_kg"] == "review"
+    assert any("LB" in w for w in warnings)
+
+
+def test_weight_with_kg_unit_is_high():
+    """单位为 KG 时正常高置信提取（样本PDF格式）。"""
+    fields, conf, warnings = extract_fields(
+        "invoice", ["GROSS WEIGHT(毛重): 12300 KG"])
+    assert fields["gross_weight_kg"] == 12300
+    assert conf["gross_weight_kg"] == "high"
+    assert warnings == []
+
+
+def test_decimal_packages_not_truncated():
+    """件数 480.5 不得截断为 480：保留原值并标记待复核。"""
+    text = ("INVOICE NO: INV1\nSELLER: S\nBUYER: B\nDESCRIPTION: Ceramic\n"
+            "TOTAL PACKAGES: 480.5\nGROSS WEIGHT: 12300\nTOTAL AMOUNT: 86400")
+    fields, conf, warnings = extract_fields("invoice", [text])
+    assert fields.get("total_packages") == "480.5"
+    assert conf["total_packages"] == "review"
+    assert any("480.5" in w for w in warnings)
+
+
+def test_unknown_type_keeps_unknown_and_needs_review():
+    """无法识别的单证：to_document 保留 unknown（不再静默转 invoice），需人工指定。"""
+    import io
+    from reportlab.pdfgen import canvas
+    buf = io.BytesIO()
+    pdf = canvas.Canvas(buf)
+    obj = pdf.beginText(40, 760)
+    for line in ("Unrecognized document with arbitrary content and no useful labels. " * 3).split():
+        obj.textLine(line)
+    pdf.drawText(obj)
+    pdf.save()
+    r = process_pdf(buf.getvalue(), "misc.pdf")
+    assert r.doc_type == "unknown"
+    assert r.to_document()["doc_type"] == "unknown"
+    assert r.needs_review
+
+
+def test_origin_certificate_has_extraction_rules():
+    """原产地证类型有字段解析规则，不再返回空字段+needs_review=False。"""
+    import io
+    from reportlab.pdfgen import canvas
+    buf = io.BytesIO()
+    pdf = canvas.Canvas(buf)
+    obj = pdf.beginText(40, 760)
+    for line in ("CERTIFICATE OF ORIGIN\nISSUER: Demo Chamber\n"
+                 "SELLER: Demo Seller\nBUYER: Demo Buyer\n"
+                 "DESCRIPTION OF GOODS: Ceramic goods\nTOTAL PACKAGES: 480").splitlines():
+        obj.textLine(line)
+    pdf.drawText(obj)
+    pdf.save()
+    r = process_pdf(buf.getvalue(), "certificate_of_origin.pdf")
+    assert r.doc_type == "certificate_of_origin"
+    assert r.fields.get("consignee_name") == "Demo Buyer"
+    assert r.fields.get("total_packages") == 480
+
+
+def test_ocr_page_failure_forces_review(monkeypatch):
+    """任一页 OCR 失败：needs_review 必须为 True，不得静默 error=None+无需复核。"""
+    def failed_ocr(*args):
+        raise RuntimeError("simulated page OCR failure")
+    monkeypatch.setattr(pdf_ingest, "_ocr_page", failed_ocr)
+    import io
+    from reportlab.pdfgen import canvas
+    buf = io.BytesIO()
+    pdf = canvas.Canvas(buf)
+    obj = pdf.beginText(40, 760)
+    for line in ("INVOICE NO: INV1", "SELLER: Demo Seller", "BUYER: Demo Buyer",
+                 "DESCRIPTION OF GOODS: Ceramic goods", "TOTAL PACKAGES: 480",
+                 "GROSS WEIGHT: 12300", "TOTAL AMOUNT: 86400"):
+        obj.textLine(line)
+    pdf.drawText(obj)
+    pdf.showPage()
+    pdf.drawString(40, 760, "scan")
+    pdf.save()
+    r = process_pdf(buf.getvalue(), "invoice.pdf")
+    assert r.error is None
+    assert r.pages_with_ocr_failure == [2]
+    assert r.needs_review
+    assert any("OCR失败" in w for w in r.warnings)
+
+
+def test_pdf_page_limit_rejects_oversized(monkeypatch):
+    """超过页数上限：显式失败并提示拆分，不进入解析（F08）。"""
+    import pdfplumber
+
+    class FakePdf:
+        pages = [object()] * 25
+
+    class FakeHandle:
+        def __enter__(self):
+            return FakePdf()
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(pdfplumber, "open", lambda *a, **kw: FakeHandle())
+    r = process_pdf(b"%PDF-fake", "big.pdf", max_pages=20)
+    assert r.error is not None
+    assert "页数超限" in r.error

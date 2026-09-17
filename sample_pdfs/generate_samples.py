@@ -58,6 +58,7 @@ def draw_invoice(missing_weight: bool = False) -> bytes:
         y = 634
     _lines(c, 60, y, [
         "TOTAL AMOUNT(金额合计): USD 86,400.00",
+        "CURRENCY(币种): USD",
         "INCOTERM: CIF ISTANBUL",
     ])
     c.save()
@@ -118,7 +119,9 @@ def draw_customs_declaration() -> bytes:
         "件数(箱数): 475",
         "毛重(KG): 12300",
         "总价(申报金额): USD 86,400.00",
+        "币种(CURRENCY): USD",
         "运抵国(目的国): 土耳其",
+        "起运国(发货国): 中国",
         "随附单证运单号: SMU/789456/2026",
         "集装箱号: TCLU1234567",
     ])
