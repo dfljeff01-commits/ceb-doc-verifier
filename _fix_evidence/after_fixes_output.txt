@@ -1,0 +1,79 @@
+==========================================================================================
+F01 非法数值与币种（修复前：全部 11 PASS、风险 0）
+[发票毛重=0] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'FAIL', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 毛重字段存在非法数值，本次未做一致性放行：商业发票 Commercial Invoice（毛重「0」为非正数，物理上不成立）
+[发票毛重=-1] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'FAIL', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 毛重字段存在非法数值，本次未做一致性放行：商业发票 Commercial Invoice（毛重「-1」为非正数，物理上不成立）
+[发票毛重='NaN'] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'FAIL', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 毛重字段存在非法数值，本次未做一致性放行：商业发票 Commercial Invoice（毛重「NaN」无法解析为合法数值）
+[发票毛重='12300kg'(待复核口径)] summary={'total': 14, 'pass': 13, 'warning': 1, 'fail': 0} risk=5/low
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'WARNING', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 各单证毛重一致或差异在1%容差内：装箱单 Packing List 12300kg、国际铁路运单 Railway Consignment Note 12300kg、出口报关单 Export Customs Declaration 12300
+[发票金额=0] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'PASS', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'FAIL', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 发票总金额「0」为非法数值（0/负数/非数字），无法作为比对基准。
+[报关币种EUR/发票USD] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'PASS', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'FAIL', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 币种矛盾：发票为USD，报关单为EUR；跨币种金额不可直接比对，本次不做金额一致性放行。
+==========================================================================================
+F02 空单证与重复单证（修复前：fields={} 全PASS；追加矛盾报关单仍全绿）
+[packing_list fields={}] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'FAIL', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'PASS', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 装箱单 Packing List：空单证（未提取到任何字段），无法核验
+[certificate_of_origin fields={}] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'FAIL', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'PASS', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 原产地证书 Certificate of Origin：空单证（未提取到任何字段），无法核验
+[追加矛盾的第二份报关单] summary={'total': 14, 'pass': 10, 'warning': 0, 'fail': 4} risk=100/high
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'FAIL', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'PASS', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'FAIL', 'CONS-007': 'PASS', 'CONS-008': 'FAIL', 'ROUTE-001': 'PASS', 'ROUTE-002': 'FAIL'}
+    说明: 存在同类型重复单证且字段相互冲突：出口报关单 Export Customs Declaration（DEC-29152026000118888、SECOND-CUSTOMS）字段冲突：declared_value（86400.0 ≠ 1）；
+==========================================================================================
+F03 语义归一化抹平规格差异（修复前：1.5mm vs 15mm 相似度1.0 全绿）
+[相似度] 钢板厚度1.5mm vs 15mm: 0.8903（修复前 1.0）
+[守卫] guard=numeric_spec grade=mismatch
+[描述规格矛盾批次] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'FAIL', 'CONS-002': 'PASS', 'CONS-003': 'PASS', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'PASS', 'ROUTE-002': 'PASS'}
+    说明: 货物描述与多数单证不一致（基准「钢板厚度1.5mm」）：出口报关单 Export Customs Declaration（「钢板厚度15mm」，语义相似度 0.89，关键实体矛盾：规格数字/单位不一致，字符相似度不作为放行依据）
+==========================================================================================
+F04 提取复核门槛（修复前：空INVOICE NO抓下一行SELLER、12,300LB当12300kg、
+     480.5截成480、丢页仍needs_review=False、unknown转invoice）
+[blank_labels] invoice_no=None (conf=missing), packages=480.0 (conf=high), weight=12300.0 (conf=high)
+[units_and_decimal] invoice_no=INV1 (conf=high), packages=480.5 (conf=review), weight=12,300 LB (conf=review)
+    warnings: ['件数（箱数）：件数「480.5」不是整数计件，已按原值保留，请人工复核', '毛重（kg）：毛重「12,300 LB」单位不是kg，请人工换算复核']
+[unknown_pdf] doc_type=unknown, to_document.doc_type=unknown, needs_review=True（修复前转invoice且无需复核）
+[ocr丢页] error=None, ocr失败页=[2], needs_review=True（修复前 needs_review=False）
+==========================================================================================
+F07 未知运单类型与覆盖集合（修复前：AIR WAYBILL 匹配；CIM/SMGS+美国 全绿）
+[AIR WAYBILL] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'PASS', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'FAIL', 'ROUTE-002': 'PASS'}
+    说明: 运单类型「AIR WAYBILL」不在受支持枚举内（仅支持：SMGS国际货协运单 / CIM国际铁路运单 / CIM-SMGS统一运单），无法进行路线合规判断，需人工复核更正。【适用边界：中欧班列国际铁路联运（SMGS 25国/CIM 18
+[CIM/SMGS统一运单+途经美国] summary={'total': 14, 'pass': 13, 'warning': 0, 'fail': 1} risk=25/medium
+    非通过项: {'SYS-001': 'PASS', 'DOC-001': 'PASS', 'DOC-002': 'PASS', 'DOC-003': 'PASS', 'CONS-001': 'PASS', 'CONS-002': 'PASS', 'CONS-003': 'PASS', 'CONS-004': 'PASS', 'CONS-005': 'PASS', 'CONS-006': 'PASS', 'CONS-007': 'PASS', 'CONS-008': 'PASS', 'ROUTE-001': 'FAIL', 'ROUTE-002': 'PASS'}
+    说明: 途经国家 美国 不在本系统路线规则覆盖范围（SMGS∪CIM 铁路联运集合）内，运单类型「CIM/SMGS」的路线合规结论不适用，需人工核实实际运输路径。【适用边界：中欧班列国际铁路联运（SMGS 25国/CIM 18国），非全球通用合规判
+    rule_version=route-rules v2.0
+    rule_coverage=当前路线规则仅覆盖中欧班列国际铁路联运场景：SMGS（《国际货协》）25国、CIM（《国际铁路运输公约》）18国，两集合...
+==========================================================================================
+F08 API结构错误与带单位毛重（修复前：documents=[null]/fields='bad' 返回500；
+     12300kg 触发TypeError）
+[documents=[null]] HTTP 422（修复前 500/异常）: {"detail":[{"type":"model_attributes_type","loc":["body","documents",0],"msg":"Input should be a val
+[fields='bad'] HTTP 422（修复前 500/异常）: {"detail":[{"type":"dict_type","loc":["body","documents",0,"fields"],"msg":"Input should be a valid 
+[documents=[]] HTTP 422（修复前 500/异常）: {"detail":[{"type":"too_short","loc":["body","documents"],"msg":"List should have at least 1 item af
+[发票毛重=12300kg] HTTP 200（修复前 500/异常）: {"batch_id":"batch_clean","batch_name":"示例批次A：全部通过（干净数据）","batch_description":"陶瓷卫浴洁具发往德国杜伊斯
+==========================================================================================
+F09 缓存签名与数据版本（修复前：文件名+大小判重、固定batch_id、下载旧文本）
+[上传缓存签名] 同名同大小不同内容: sig(a)!=sig(b) → True（修复前相等误命中）；同内容: sig(a)==sig(c) → True
+[数据版本] 原批次=83dd340148f37cbf，编辑箱数后=8212a2fba9edbdfa，版本变化=True
+==========================================================================================
+F10 数值推演门卫（修复前：不调工具的'风险0'响应被当有效结果展示，真实重算95）
+[不配合LLM] mode=unverified（修复前 live 直接展示）
+    回复: ⚠️ 未能完成计算验证：本次推演未触发核验引擎真实重算，系统拒绝呈现未经重算验证的数值结论（模型给出的数字不作为依据）。请重新提问，例如：『如果报关箱数改成480，风险会变成多少？
+[真实重算] 风险分=95（高风险）
+==========================================================================================
+F10 评估口径与冻结留出集（修复前：main每次覆盖评估样本；0F/1F口径与评分矛盾）
+[冻结留出集] 读取 19 个固定文件（评估只读不覆盖），三方一致 19/19
+[审查反例1] 0 FAIL+2 WARNING(25分) → 口径=medium（修复前标注low与模型medium矛盾）
+[审查反例2] 1 FAIL+2 WARNING(55分) → 口径=high（修复前标注medium与模型high矛盾）
+==========================================================================================
+AFTER-FIX PROBES DONE

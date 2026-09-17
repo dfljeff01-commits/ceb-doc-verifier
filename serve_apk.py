@@ -17,7 +17,7 @@ import qrcode.image.pil
 ROOT = Path(__file__).parent
 APK_DIR = ROOT / "mobile_app" / "build" / "app" / "outputs" / "flutter-apk"
 # 分发arm64版（现代手机，17MB）；老设备请改用 app-release.apk（49MB通用版）
-APK = APK_DIR / "app-arm64-v8a-release.apk""
+APK = APK_DIR / "app-arm64-v8a-release.apk"
 PORT = 8001
 
 

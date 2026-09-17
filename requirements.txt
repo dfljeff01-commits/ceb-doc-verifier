@@ -3,6 +3,10 @@ pandas==3.0.5
 reportlab==5.0.1
 fastapi==0.141.1
 uvicorn==0.53.0
+# /ingest/image、/ingest/pdf 上传路由的必需依赖（缺失时 import api 直接失败，F06）
+python-multipart==0.0.32
+# serve_apk.py 二维码生成依赖（F06）
+qrcode==8.2
 pdfplumber==0.11.10
 pymupdf==1.28.2
 pdf2image==1.17.0

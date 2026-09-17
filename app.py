@@ -707,7 +707,7 @@ with st.sidebar:
                        "（文本型PDF不受影响）。安装方法见 README。")
 
     st.divider()
-    st.caption("Demo 版 v1.1 · 规则引擎 + 风险评分 + 语义比对 + LLM协同")
+    st.caption("Demo 版 v1.3 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同（审查整改后）")
 
 # ---------------- 非示例模式的PDF提取区 ----------------
 

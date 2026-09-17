@@ -25,13 +25,18 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# 应用代码
-COPY verification_engine.py risk_model.py semantic.py llm_layer.py llm_presets.json \
-     pdf_ingest.py api.py app.py selftest.py evaluation.py start.sh \
+# 应用代码（doc_contract.py 为数据契约层，被引擎/摄取/API/网页共同引用）
+COPY verification_engine.py risk_model.py semantic.py doc_contract.py llm_layer.py \
+     llm_presets.json pdf_ingest.py api.py app.py selftest.py evaluation.py start.sh \
      chat_assistant.py email_generator.py knowledge_base.py llm_endpoint.py ./
 COPY sample_data/ sample_data/
 COPY sample_pdfs/ sample_pdfs/
+COPY evaluation_set/ evaluation_set/
 
 EXPOSE 8501 8000
+
+# API健康状态可见（F06）：/health 失败即标记 unhealthy
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)" || exit 1
 
 CMD ["bash", "start.sh"]
