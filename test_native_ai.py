@@ -414,8 +414,8 @@ def _load_collect_edited_documents(fake_st):
     funcs, assigns, editable = [], [], None
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in (
-                "collect_edited_documents", "_serialize_edited_value", "_value_changed",
-                "_doc_title"):
+                "collect_edited_documents", "render_doc_field_editor",
+                "_serialize_edited_value", "_value_changed", "_doc_title"):
             node.decorator_list = []
             funcs.append(node)
         if isinstance(node, ast.Assign):

@@ -1,0 +1,5 @@
+# Streamlit 界面配置
+# viewer 模式隐藏右上角 Deploy 按钮与开发者工具（任务书问题五）：
+# 这些是 Streamlit 平台自己的部署入口，与本产品无关，避免使用者误按。
+[client]
+toolbarMode = "viewer"

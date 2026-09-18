@@ -1,0 +1,76 @@
+{
+  "scenario": "架构方实测反馈原始场景复现（整改前）：3份运单混合PDF，旧管线当1份处理",
+  "pdf": "sample_pdfs/waybills_x3.pdf",
+  "旧管线判定": {
+    "文档数": 1,
+    "doc_type": "railway_waybill",
+    "提取的运单号": "SMU/789456/2026",
+    "提取件数": 160.0,
+    "提取毛重": 4100.0
+  },
+  "风险分": 95,
+  "grade": "高风险",
+  "summary": {
+    "total": 14,
+    "pass": 5,
+    "warning": 8,
+    "fail": 1
+  },
+  "non_pass": [
+    {
+      "check_id": "DOC-001",
+      "check_name": "必需单证齐全性检查",
+      "status": "FAIL",
+      "detail": "缺少必需单证：商业发票（Commercial Invoice）、装箱单（Packing List）、出口报关单（Export Customs Declaration）、原产地证书（Certificate of Origin）"
+    },
+    {
+      "check_id": "CONS-001",
+      "check_name": "货物描述一致性",
+      "status": "WARNING",
+      "detail": "载有货物描述的单证不足2份，无法交叉比对。"
+    },
+    {
+      "check_id": "CONS-002",
+      "check_name": "件数（箱数）一致性",
+      "status": "WARNING",
+      "detail": "载有件数的单证不足2份，无法交叉比对。"
+    },
+    {
+      "check_id": "CONS-003",
+      "check_name": "毛重一致性（容差1%）",
+      "status": "WARNING",
+      "detail": "载有毛重的单证不足2份，无法交叉比对。"
+    },
+    {
+      "check_id": "CONS-004",
+      "check_name": "发货人名称一致性",
+      "status": "WARNING",
+      "detail": "载有发货人名称的单证不足2份，无法交叉比对。"
+    },
+    {
+      "check_id": "CONS-005",
+      "check_name": "收货人名称一致性",
+      "status": "WARNING",
+      "detail": "载有收货人名称的单证不足2份，无法交叉比对。"
+    },
+    {
+      "check_id": "CONS-006",
+      "check_name": "报关单运单号交叉核对",
+      "status": "WARNING",
+      "detail": "缺少铁路运单或出口报关单，无法交叉核对运单号。"
+    },
+    {
+      "check_id": "CONS-008",
+      "check_name": "报关金额与发票金额核对",
+      "status": "WARNING",
+      "detail": "缺少发票或报关单，无法核对申报金额。"
+    },
+    {
+      "check_id": "ROUTE-002",
+      "check_name": "报关起运/目的国与运单路线核对",
+      "status": "WARNING",
+      "detail": "缺少铁路运单或报关单，无法核对路线端点。"
+    }
+  ],
+  "结论": "运单#2/#3的运单号/件数/毛重完全丢失，结果无法解释问题出在哪份单据"
+}

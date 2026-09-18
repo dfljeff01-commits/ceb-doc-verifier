@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 
 import doc_contract
+import doc_rules
 import risk_model
 import semantic
 
@@ -60,6 +61,29 @@ REQUIRED_DOC_NAMES = {
 }
 
 DOC_TYPE_NAMES = {**REQUIRED_DOC_NAMES, "unknown": "未识别单证（需人工指定）"}
+
+# 单据实例短名（"运单#1"式标签，任务书问题四：结果定位到"哪份单据"）
+DOC_TYPE_SHORT = {
+    "invoice": "发票",
+    "packing_list": "装箱单",
+    "railway_waybill": "运单",
+    "export_customs_declaration": "报关单",
+    "certificate_of_origin": "产地证",
+    "unknown": "单据",
+}
+
+# 检查项对应的主字段（任务书问题四：每条问题标注"哪个字段"）
+CHECK_FIELD = {
+    "CONS-001": "goods_description",
+    "CONS-002": "total_packages",
+    "CONS-003": "gross_weight_kg",
+    "CONS-004": "consignor_name",
+    "CONS-005": "consignee_name",
+    "CONS-006": "waybill_no",
+    "CONS-007": "container_no",
+    "CONS-008": "total_amount",
+    "ROUTE-002": "destination_country",
+}
 
 # 兼容旧引用：覆盖集合统一定义在 doc_contract（修复 F07 后的唯一事实来源）
 SMGS_COUNTRIES = doc_contract.SMGS_COUNTRIES
@@ -135,6 +159,19 @@ def _group_by_field(documents: list, key: str) -> list:
     return pairs
 
 
+def build_instance_labels(documents: list) -> dict:
+    """单据实例标签（任务书问题四）：按类型出现顺序编号，
+    如 {doc_id: "运单#1"}。同类型多份（多车厢/分批）由此可区分。"""
+    counters: dict = {}
+    labels: dict = {}
+    for doc in documents:
+        dtype = doc.get("doc_type") or "unknown"
+        counters[dtype] = counters.get(dtype, 0) + 1
+        doc_id = doc.get("doc_id") or f"{dtype}-{counters[dtype]}"
+        labels[doc_id] = f"{DOC_TYPE_SHORT.get(dtype, dtype)}#{counters[dtype]}"
+    return labels
+
+
 # ---------------------------------------------------------------- 输入结构检查（F08）
 
 
@@ -181,50 +218,70 @@ def check_completeness(documents: list) -> dict:
 
 def check_field_completeness(documents: list) -> dict:
     """单证字段完整性（修复 F02）：空单证不得静默全绿；
-    缺身份编号字段、类型无法识别的单证显式转人工。"""
-    problems = []   # (status, 单证名, 问题)
+    缺身份编号字段、类型无法识别的单证显式转人工。
+    involved_docs 记录问题所属单据（任务书问题四：问题可归到"哪份单据"）。"""
+    problems = []   # (status, 单证名, 问题, doc_id)
+    involved = []
     for doc in documents:
         dtype = doc.get("doc_type") or "unknown"
         fields = doc.get("fields") or {}
         name = _doc_name(doc)
+        doc_id = doc.get("doc_id")
         if dtype == "unknown":
-            problems.append((STATUS_WARNING, name, "单证类型无法识别，需人工指定类型后再核验"))
+            problems.append((STATUS_WARNING, name, "单证类型无法识别，需人工指定类型后再核验", doc_id))
             continue
         if not fields:
-            problems.append((STATUS_FAIL, name, "空单证（未提取到任何字段），无法核验"))
+            problems.append((STATUS_FAIL, name, "空单证（未提取到任何字段），无法核验", doc_id))
             continue
         id_field = doc_contract.IDENTITY_FIELDS.get(dtype)
         if id_field and _field(doc, id_field) is None:
             label = doc_contract.FIELD_LABELS_ZH.get(id_field, id_field)
-            problems.append((STATUS_WARNING, name, f"缺少单证编号（{label}），需人工补齐"))
+            problems.append((STATUS_WARNING, name, f"缺少单证编号（{label}），需人工补齐", doc_id))
     if problems:
+        involved = [p[3] for p in problems if p[3]]
         worst = STATUS_FAIL if any(p[0] == STATUS_FAIL for p in problems) else STATUS_WARNING
-        detail = "；".join(f"{name}：{msg}" for _, name, msg in problems)
+        detail = "；".join(f"{name}：{msg}" for _, name, msg, _ in problems)
         return _make_result(
             "DOC-002", "单证齐全性", "单证字段完整性检查", worst, detail,
-            [], "请在预览区人工补齐缺失字段（或指定单证类型）后重新核验；空单证不得进入放行流程。")
+            involved, "请在预览区人工补齐缺失字段（或指定单证类型）后重新核验；空单证不得进入放行流程。")
     return _make_result(
         "DOC-002", "单证齐全性", "单证字段完整性检查", STATUS_PASS,
         f"各单证字段完整（含单证编号，共{len(documents)}份）。", [], None)
 
 
-def check_duplicate_documents(documents: list) -> dict:
+def check_duplicate_documents(documents: list, declared_composition: dict | None = None) -> dict:
     """同类型重复单证检查（修复 F02）：重复类型必须显式覆盖——
-    字段冲突判 FAIL（不再只采信第一份）；字段完全一致也提示去重。"""
+    字段冲突判 FAIL（不再只采信第一份）；字段完全一致也提示去重。
+
+    声明构成感知（任务书问题一/二）：用户在第1步申报"运单3份"（多车厢/分批）
+    时，该类型份数不超过申报数即为合法实例，不判重复；超过申报数仍按重复
+    逻辑处理。未申报时维持原有口径（同类型多份即重复）。"""
+    declared = {t: n for t, n in (declared_composition or {}).items()
+                if isinstance(n, int) and n > 0}
     groups: dict = {}
     for doc in documents:
         dtype = doc.get("doc_type")
         if dtype:
             groups.setdefault(dtype, []).append(doc)
-    dups = {t: ds for t, ds in groups.items() if len(ds) > 1}
+    legit_multi = {t: n for t, n in declared.items()
+                   if n > 1 and len(groups.get(t, [])) <= n}
+    dups = {t: ds for t, ds in groups.items() if len(ds) > declared.get(t, 1)}
     if not dups:
+        if legit_multi:
+            notes = "、".join(f"{doc_contract.DOC_TYPE_LABELS.get(t, t)}×{n}"
+                              for t, n in sorted(legit_multi.items()))
+            return _make_result(
+                "DOC-003", "单证齐全性", "单证重复与冲突检查", STATUS_PASS,
+                f"同类型多份单证（{notes}）与申报构成一致，属合法多实例"
+                f"（多车厢/分批场景），已按独立单据分别核验。", [], None)
         return _make_result(
             "DOC-003", "单证齐全性", "单证重复与冲突检查", STATUS_PASS,
             "无同类型重复单证。", [], None)
     conflicts, identical = [], []
+    dup_doc_ids = []
     for dtype, ds in dups.items():
         type_name = doc_contract.DOC_TYPE_LABELS.get(dtype, dtype)
-        doc_ids = "、".join(str(d.get("doc_id") or _doc_name(d)) for d in ds)
+        dup_doc_ids.extend(d.get("doc_id") for d in ds)
         shared = set((ds[0].get("fields") or {}).keys())
         for other in ds[1:]:
             shared &= set((other.get("fields") or {}).keys())
@@ -235,19 +292,99 @@ def check_duplicate_documents(documents: list) -> dict:
             if doc_contract.canonical_json(v1) != doc_contract.canonical_json(v2):
                 diff.append(f"{key}（{v1} ≠ {v2}）")
         if diff:
-            conflicts.append(f"{type_name}（{doc_ids}）字段冲突：{'；'.join(diff[:6])}")
+            conflicts.append(f"{type_name}（{doc_ids}）字段冲突：{'；'.join(diff[:6])}"
+                             if (doc_ids := "、".join(str(d.get("doc_id") or _doc_name(d)) for d in ds)) else type_name)
         else:
-            identical.append(f"{type_name}（{doc_ids}，{len(ds)}份字段完全相同）")
+            identical.append(f"{type_name}（{doc_ids}，{len(ds)}份字段完全相同）"
+                             if (doc_ids := "、".join(str(d.get("doc_id") or _doc_name(d)) for d in ds)) else type_name)
     if conflicts:
         return _make_result(
             "DOC-003", "单证齐全性", "单证重复与冲突检查", STATUS_FAIL,
-            "存在同类型重复单证且字段相互冲突：" + "；".join(conflicts), [],
-            "同一批次每种单证应仅一份；请删除错误版本单证或更正一致后再核验——"
+            "存在同类型重复单证且字段相互冲突：" + "；".join(conflicts), dup_doc_ids,
+            "同一批次每种单证超出申报份数的部分应去重；请删除错误版本单证或更正一致后再核验——"
             "在去重之前，本系统不采信该类型单证的任何『一致』结论。")
     return _make_result(
         "DOC-003", "单证齐全性", "单证重复与冲突检查", STATUS_WARNING,
-        "存在同类型重复单证：" + "；".join(identical), [],
-        "请确认是否重复提交并去重；若为正本+副本请人工确认后忽略本提示。")
+        "存在同类型重复单证：" + "；".join(identical), dup_doc_ids,
+        "申报份数之外存在重复提交，请确认并去重；若为正本+副本请人工确认后忽略本提示。")
+
+
+def check_declared_composition(documents: list, declared_composition: dict | None) -> list:
+    """实收构成与申报构成核对（任务书问题二第1步的闭环）：
+    用户申报"发票1、运单3"后，实际识别/上传的构成与之不符时显式告警，
+    提示回上一步调整声明或补传，不让构成差异静默进入核验。"""
+    if not declared_composition:
+        return []
+    declared = {t: n for t, n in declared_composition.items()
+                if isinstance(n, int) and n >= 0}
+    actual: dict = {}
+    for doc in documents:
+        dtype = doc.get("doc_type") or "unknown"
+        actual[dtype] = actual.get(dtype, 0) + 1
+    notes = []
+    for t, n in declared.items():
+        got = actual.get(t, 0)
+        if got != n:
+            tname = doc_contract.DOC_TYPE_LABELS.get(t, t)
+            if got < n:
+                notes.append(f"{tname}申报{n}份，实际仅{got}份（少{-(got - n)}份，请回上一步补传）")
+            else:
+                notes.append(f"{tname}申报{n}份，实际{got}份（多{got - n}份，请核对是否重复上传）")
+    undeclared = [t for t in actual if t not in declared and actual[t] > 0]
+    for t in undeclared:
+        notes.append(f"{doc_contract.DOC_TYPE_LABELS.get(t, t)}×{actual[t]}未在第一步申报"
+                     f"（请回第一步调整构成声明，或人工指定类型）")
+    if notes:
+        return [_make_result(
+            "DOC-004", "单证齐全性", "实收构成与申报构成核对", STATUS_WARNING,
+            "实际单证构成与申报不一致：" + "；".join(notes), [],
+            "请回到上一步调整构成声明或补传缺失单据；构成不符时，齐全性与交叉比对的结论不完整。")]
+    pretty = "、".join(f"{doc_contract.DOC_TYPE_LABELS.get(t, t)}×{n}"
+                       for t, n in sorted(declared.items()))
+    return [_make_result(
+        "DOC-004", "单证齐全性", "实收构成与申报构成核对", STATUS_PASS,
+        f"实际单证构成与申报一致：{pretty}（共{len(documents)}份）。", [], None)]
+
+
+def check_document_rules(documents: list) -> list:
+    """单据级规范检查（任务书问题三/四）：对每一份单据执行 doc_rules.yaml
+    知识库中该类型的必填/格式/数值范围规则（如"运单缺少收货人"判FAIL），
+    每份单据产出一条聚合结果，字段级问题放在 field_issues 供分层展示。
+    每条结果附带规则知识库版本号。"""
+    labels = build_instance_labels(documents)
+    rule_set = doc_rules.load_rules()
+    results = []
+    for doc in documents:
+        dtype = doc.get("doc_type") or "unknown"
+        if dtype == "unknown":
+            continue      # 类型未知的单证由 DOC-002 提示人工指定，规范规则无从适用
+        doc_id = doc.get("doc_id") or ""
+        label = labels.get(doc_id, dtype)
+        report = doc_rules.check_document(doc)
+        if report["status"] == doc_rules.STATUS_PASS:
+            results.append(_make_result(
+                "DOC-101", "单据规范", f"单据规范检查（{label}）", STATUS_PASS,
+                f"{label}（{_doc_name(doc)}）通过单据级规范检查"
+                f"（适用规则 {sum(1 for r in rule_set['rules'] if r['doc_type'] == dtype)} 条）。",
+                [doc_id], None,
+                doc_label=label, field_issues=[], doc_id=doc_id,
+                rules_version=rule_set["version"]))
+            continue
+        issues = report["field_issues"]
+        fail_issues = [i for i in issues if i["severity"] == "fail"]
+        warn_issues = [i for i in issues if i["severity"] != "fail"]
+        status = STATUS_FAIL if fail_issues else STATUS_WARNING
+        parts = [f"缺少{i['field_label']}（{i['message']}）" if i["message"].startswith("缺少")
+                 else f"{i['field_label']}：{i['message']}" for i in issues]
+        results.append(_make_result(
+            "DOC-101", "单据规范", f"单据规范检查（{label}）", status,
+            f"{label}（{_doc_name(doc)}）存在{len(fail_issues)}项硬性不规范、{len(warn_issues)}项待复核："
+            + "；".join(parts),
+            [doc_id],
+            "；".join(report["suggestions"]),
+            doc_label=label, field_issues=issues, doc_id=doc_id,
+            rules_version=rule_set["version"]))
+    return results
 
 
 # ---------------------------------------------------------------- 一致性检查
@@ -676,8 +813,9 @@ def _route_rule_meta() -> dict:
     return {"rule_version": ROUTE_RULE_VERSION, "rule_coverage": ROUTE_RULE_COVERAGE}
 
 
-def check_waybill_type_route(documents: list) -> dict:
-    """运单类型与线路匹配（修复 F07）：
+def check_waybill_type_route(documents: list) -> list:
+    """运单类型与线路匹配（修复 F07；任务书问题四按实例核验）：
+    - 对每一份铁路运单独立判断（多运单批次下，问题能定位到具体哪份运单）；
     - 运单类型限定受支持枚举（SMGS / CIM / CIM-SMGS统一运单）；
       枚举外值（如 AIR WAYBILL）判"类型不支持，需人工复核"，不进入路线覆盖判断；
     - 覆盖集合按运单类型取对应集合，统一运单取 SMGS∪CIM 并集；
@@ -685,23 +823,31 @@ def check_waybill_type_route(documents: list) -> dict:
     - 每条结果附带规则版本与覆盖范围说明。"""
     waybills = [d for d in documents if d.get("doc_type") == "railway_waybill"]
     if not waybills:
-        return _make_result(
+        return [_make_result(
             "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_WARNING,
             f"缺少铁路运单，无法核验路线合规性。{_ROUTE_RULE_NOTE}", [], "请先补齐国际铁路运单。",
-            **_route_rule_meta())
-    wb = waybills[0]
+            **_route_rule_meta())]
+    labels = build_instance_labels(documents)
+    results = []
+    for wb in waybills:
+        label = labels.get(wb.get("doc_id") or "", "运单")
+        results.append(_check_single_waybill_route(wb, label))
+    return results
+
+
+def _check_single_waybill_route(wb: dict, label: str) -> dict:
     wb_type = _norm_text(_field(wb, "waybill_type") or "")
     route = _field(wb, "route_countries") or []
     if not wb_type or not route:
         return _make_result(
-            "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_WARNING,
-            f"运单缺少运单类型或经停国家信息，无法核验。{_ROUTE_RULE_NOTE}",
-            [wb.get("doc_id")], "请在运单上补填运单类型（SMGS/CIM）及经停国家。",
+            "ROUTE-001", "路线合规性", f"运单类型与线路匹配（{label}）", STATUS_WARNING,
+            f"{label}缺少运单类型或经停国家信息，无法核验。{_ROUTE_RULE_NOTE}",
+            [wb.get("doc_id")], f"请在{label}上补填运单类型（SMGS/CIM）及经停国家。",
             **_route_rule_meta())
     if isinstance(route, str) or not all(isinstance(c, str) for c in route):
         return _make_result(
-            "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_WARNING,
-            f"经停国家字段格式异常（应为字符串列表，收到：{route!r}），需人工复核。{_ROUTE_RULE_NOTE}",
+            "ROUTE-001", "路线合规性", f"运单类型与线路匹配（{label}）", STATUS_WARNING,
+            f"{label}经停国家字段格式异常（应为字符串列表，收到：{route!r}），需人工复核。{_ROUTE_RULE_NOTE}",
             [wb.get("doc_id")], "请将经停国家改为国家列表（如 [\"中国\", \"德国\"]）后重新核验。",
             **_route_rule_meta())
 
@@ -709,8 +855,8 @@ def check_waybill_type_route(documents: list) -> dict:
     kind = doc_contract.classify_waybill_type(wb_type)
     if kind is None:
         return _make_result(
-            "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_FAIL,
-            f"运单类型「{wb_type}」不在受支持枚举内（仅支持：SMGS国际货协运单 / "
+            "ROUTE-001", "路线合规性", f"运单类型与线路匹配（{label}）", STATUS_FAIL,
+            f"{label}运单类型「{wb_type}」不在受支持枚举内（仅支持：SMGS国际货协运单 / "
             f"CIM国际铁路运单 / CIM-SMGS统一运单），无法进行路线合规判断，需人工复核更正。"
             f"{_ROUTE_RULE_NOTE}",
             [wb.get("doc_id")],
@@ -725,8 +871,8 @@ def check_waybill_type_route(documents: list) -> dict:
     if outside:
         bad = "、".join(outside)
         return _make_result(
-            "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_FAIL,
-            f"途经国家 {bad} 不在本系统路线规则覆盖范围（SMGS∪CIM 铁路联运集合）内，"
+            "ROUTE-001", "路线合规性", f"运单类型与线路匹配（{label}）", STATUS_FAIL,
+            f"{label}途经国家 {bad} 不在本系统路线规则覆盖范围（SMGS∪CIM 铁路联运集合）内，"
             f"运单类型「{wb_type}」的路线合规结论不适用，需人工核实实际运输路径。{_ROUTE_RULE_NOTE}",
             [wb.get("doc_id")],
             f"{bad}不在中欧班列常见铁路通道覆盖集合内：请人工确认是否为真实路线；"
@@ -738,8 +884,8 @@ def check_waybill_type_route(documents: list) -> dict:
     if uncovered and kind == doc_contract.WAYBILL_KIND_SMGS:
         bad = "、".join(uncovered)
         return _make_result(
-            "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_WARNING,
-            f"线路含{bad}，但运单类型为{wb_type}（SMGS运单不覆盖{bad}段）。{_ROUTE_RULE_NOTE}",
+            "ROUTE-001", "路线合规性", f"运单类型与线路匹配（{label}）", STATUS_WARNING,
+            f"{label}线路含{bad}，但运单类型为{wb_type}（SMGS运单不覆盖{bad}段）。{_ROUTE_RULE_NOTE}",
             [wb.get("doc_id")],
             f"本线路经由{bad}（中间走廊/巴库-第比利斯-卡尔斯段），建议改用CIM/SMGS统一运单，"
             f"或提前与承运人确认卡尔斯换装段的运单转换与补单安排，避免边境段无有效运单凭证。",
@@ -747,20 +893,21 @@ def check_waybill_type_route(documents: list) -> dict:
     if uncovered and kind == doc_contract.WAYBILL_KIND_CIM:
         bad = "、".join(uncovered)
         return _make_result(
-            "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_WARNING,
-            f"线路含{bad}，但运单类型为{wb_type}（CIM运单不覆盖{bad}段）。{_ROUTE_RULE_NOTE}",
+            "ROUTE-001", "路线合规性", f"运单类型与线路匹配（{label}）", STATUS_WARNING,
+            f"{label}线路含{bad}，但运单类型为{wb_type}（CIM运单不覆盖{bad}段）。{_ROUTE_RULE_NOTE}",
             [wb.get("doc_id")],
             f"CIM运单不覆盖{bad}段，建议改用CIM/SMGS统一运单或分段衔接安排。",
             **_route_rule_meta())
     return _make_result(
-        "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_PASS,
-        f"运单类型「{wb_type}」与经停国家（{'、'.join(route)}）匹配。{_ROUTE_RULE_NOTE}",
+        "ROUTE-001", "路线合规性", f"运单类型与线路匹配（{label}）", STATUS_PASS,
+        f"{label}运单类型「{wb_type}」与经停国家（{'、'.join(route)}）匹配。{_ROUTE_RULE_NOTE}",
         [wb.get("doc_id")], None,
         **_route_rule_meta())
 
 
 def check_route_ends(documents: list) -> dict:
-    """报关起运/目的国与运单路线端点核对（覆盖每一份报关单；附带规则元信息）。"""
+    """报关起运/目的国与运单路线端点核对（覆盖每一份报关单；附带规则元信息）。
+    多运单批次下以第一份载有路线信息的运单为基准（同批多车厢运单路线一致）。"""
     waybills = [d for d in documents if d.get("doc_type") == "railway_waybill"]
     customs = [d for d in documents if d.get("doc_type") == "export_customs_declaration"]
     if not waybills or not customs:
@@ -768,12 +915,13 @@ def check_route_ends(documents: list) -> dict:
             "ROUTE-002", "路线合规性", "报关起运/目的国与运单路线核对", STATUS_WARNING,
             "缺少铁路运单或报关单，无法核对路线端点。", [], "请先补齐铁路运单与出口报关单。",
             **_route_rule_meta())
-    route = _field(waybills[0], "route_countries") or []
+    baseline = next((wb for wb in waybills if _field(wb, "route_countries")), waybills[0])
+    route = _field(baseline, "route_countries") or []
     if not route:
         return _make_result(
             "ROUTE-002", "路线合规性", "报关起运/目的国与运单路线核对", STATUS_WARNING,
             "运单经停国家信息缺失，无法核对路线端点。",
-            [waybills[0].get("doc_id")],
+            [baseline.get("doc_id")],
             "请补填运单经停国家。", **_route_rule_meta())
     if isinstance(route, str) or not all(isinstance(c, str) for c in route):
         return _make_result(
@@ -810,9 +958,6 @@ def check_route_ends(documents: list) -> dict:
 # ---------------------------------------------------------------- 主入口
 
 CHECK_RUNNERS = [
-    check_completeness,
-    check_field_completeness,
-    check_duplicate_documents,
     check_goods_description,
     check_total_packages,
     check_gross_weight,
@@ -821,9 +966,58 @@ CHECK_RUNNERS = [
     check_waybill_no_crossref,
     check_container_no,
     check_declared_amount,
-    check_waybill_type_route,
     check_route_ends,
 ]
+
+
+def build_document_groups(documents: list, results: list) -> tuple[list, list]:
+    """把扁平的检查结果按单据实例分组（任务书问题四）。
+    返回 (document_groups, batch_level_issues)：
+      document_groups: 每份单据一组 {doc_id, label, doc_type, title, fail_count,
+                         warning_count, issues:[问题列表(含字段与建议)]}；
+      batch_level_issues: 无法归属到单份单据的批次级问题（缺单证/结构/构成核对等）。
+    交叉比对类问题按 involved_docs 归入每份涉及单据的组（如"毛重与发票不符"
+    同时出现在偏差单据与基准单据的组里，两侧都能看到）。"""
+    labels = build_instance_labels(documents)
+    known_ids = {doc.get("doc_id") for doc in documents}
+    groups = []
+    for doc in documents:
+        doc_id = doc.get("doc_id") or ""
+        groups.append({
+            "doc_id": doc_id,
+            "label": labels.get(doc_id, doc.get("doc_type", "单据")),
+            "doc_type": doc.get("doc_type") or "unknown",
+            "title": _doc_name(doc),
+            "fail_count": 0,
+            "warning_count": 0,
+            "issues": [],
+        })
+    by_id = {g["doc_id"]: g for g in groups if g["doc_id"]}
+    batch_issues = []
+    for r in results:
+        if r["status"] == STATUS_PASS:
+            continue
+        involved = [d for d in (r.get("involved_docs") or []) if d in by_id]
+        issue = {
+            "check_id": r.get("check_id"),
+            "check_name": r.get("check_name"),
+            "category": r.get("category"),
+            "status": r.get("status"),
+            "detail": r.get("detail"),
+            "field": r.get("field"),
+            "suggestion": r.get("suggestion"),
+        }
+        if involved:
+            for doc_id in involved:
+                g = by_id[doc_id]
+                g["issues"].append(issue)
+                if r["status"] == STATUS_FAIL:
+                    g["fail_count"] += 1
+                else:
+                    g["warning_count"] += 1
+        else:
+            batch_issues.append(issue)
+    return groups, batch_issues
 
 
 def run_verification(batch: dict) -> dict:
@@ -839,13 +1033,32 @@ def run_verification(batch: dict) -> dict:
         "summary": {"total": n, "pass": p, "warning": w, "fail": f},
         "risk": { "score": 0-100, "grade": "low"|"medium"|"high",
                   "grade_label": ..., "breakdown": [可解释分数构成] },
-        "suggestions": [ 仅为 FAIL/WARNING 项动态生成的修正建议文本, ... ]
+        "suggestions": [ 仅为 FAIL/WARNING 项动态生成的修正建议文本, ... ],
+        # ---- 任务书问题四新增：分层结构（按单据实例分组，API与页面共用） ----
+        "document_groups": [ {doc_id, label, doc_type, title, fail_count,
+                              warning_count, issues:[...]} , ...],
+        "batch_level_issues": [ 无法归属单份单据的批次级问题 ],
+        "declared_composition": {申报构成原样回显，未申报时为 null},
+        "doc_rules_version": 单据级规则知识库版本,
     }
     """
     raw_documents = batch.get("documents", [])
+    declared = batch.get("declared_composition") or None
     documents, _dropped = doc_contract.sanitize_documents(raw_documents)
+
     results = [check_input_structure(raw_documents)]
-    results += [runner(documents) for runner in CHECK_RUNNERS]
+    results.append(check_completeness(documents))
+    results.append(check_field_completeness(documents))
+    results.append(check_duplicate_documents(documents, declared))
+    results.extend(check_declared_composition(documents, declared))
+    results.extend(check_document_rules(documents))
+    results.extend(runner(documents) for runner in CHECK_RUNNERS)
+    # ROUTE-001 对每份运单独立产出结果（多运单批次返回列表）
+    results.extend(check_waybill_type_route(documents))
+
+    for r in results:
+        if r.get("field") is None and r.get("check_id") in CHECK_FIELD:
+            r["field"] = CHECK_FIELD[r["check_id"]]
 
     summary = {
         "total": len(results),
@@ -859,6 +1072,7 @@ def run_verification(batch: dict) -> dict:
         for r in results
         if r["status"] in (STATUS_FAIL, STATUS_WARNING) and r.get("suggestion")
     ]
+    document_groups, batch_level_issues = build_document_groups(documents, results)
     return {
         "batch_id": batch.get("batch_id", ""),
         "batch_name": batch.get("batch_name", ""),
@@ -868,6 +1082,10 @@ def run_verification(batch: dict) -> dict:
         "summary": summary,
         "risk": risk,
         "suggestions": suggestions,
+        "document_groups": document_groups,
+        "batch_level_issues": batch_level_issues,
+        "declared_composition": declared,
+        "doc_rules_version": doc_rules.rules_version(),
     }
 
 

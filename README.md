@@ -2,16 +2,21 @@
 
 > **一句话场景**：中欧班列欧洲枢纽换装平均耗时38.7小时，单证不一致是主因之一——本工具在发运前自动核验单证一致性、齐全性与路线合规性，几秒内发现人工容易漏掉的单证问题，降低边境滞留与退运风险。
 
-面向"AI+行业"类竞赛的单点 AI 工具 Demo：上传真实 PDF 单证或加载模拟批次，系统自动完成 **判型 → 文字提取/OCR → 字段解析 → 多维交叉核验 → 风险评分 → AI 修正建议**，输出结构化核验报告（红/黄/绿 + 可解释的风险分数构成），并支持一键导出 PDF 报告与 API 集成。
+面向"AI+行业"类竞赛的单点 AI 工具 Demo：上传真实 PDF 单证或加载模拟批次，系统自动完成 **判型 → 文字提取/OCR → 单据边界识别（多单据PDF拆分） → 字段解析 → 单据级规范检查 + 多维交叉核验 → 风险评分 → AI 修正建议**，输出结构化核验报告（红/黄/绿 + 可解释的风险分数构成 + **按单据实例分组的分层问题清单**），并支持一键导出 PDF 报告与 API 集成。
 
 ## 系统架构（混合AI叙事）
 
 ```
-PDF上传 ──► 判型(文本/扫描) ──► 文字层直取 / pytesseract OCR
+PDF上传（向导式：声明构成 → 逐类型上传 → 逐份确认 → 核验）
+        │  一份PDF含多份单据时自动拆分（单据编号/类型变化信号），边界不确定时请用户确认
+        ▼
+单据边界识别 pdf_ingest.split_pdf ──► N份独立单据（逐份提取+校验）
                                     │
 示例批次(模拟OCR) ──────────────────┤
                                     ▼
-              规则引擎 verification_engine（齐全性/一致性/路线合规 11项检查）
+        单据级规范检查 doc_rules（YAML知识库：必填/格式/范围，如"运单缺收货人=FAIL"）
+                                    +
+              规则引擎 verification_engine（齐全性/一致性/路线合规/申报构成核对）
                                     │
                      语义比对 semantic（描述字段语义相似度分级）
                                     ▼
@@ -20,10 +25,10 @@ PDF上传 ──► 判型(文本/扫描) ──► 文字层直取 / pytesserac
                        灰色地带（存疑/边界）→ LLM协同推理 llm_layer
                                     │                       （预置结果 + 可实时调用）
                                     ▼
-        风险评分 risk_model ──► 💬 对话式助手(工具调用重算) 📧 整改邮件
-                                    ▼                              ▼
-                    📖 合规依据知识库检索（向量）                    中英双语草稿
-        Streamlit 界面（仪表盘/明细/建议/AI推理说明/PDF导出）  +  FastAPI /verify
+        分层核验结果 ──► 💬 对话式助手  📧 整改邮件（按单据分组陈述）
+        顶层总评分 / 中层按单据实例分组 / 底层字段级问题+修改建议
+                                    ▼
+        Streamlit 界面（向导流程/分层结果/PDF导出）  +  FastAPI /verify（返回document_groups）
 ```
 
 **"规则引擎做筛选 → LLM做复杂判断和解释"**：确定性规则负责硬性校验；语义相似度落在 0.6-0.85 灰色区、或路线合规告警等边界案例，交给 LLM 二次判断并输出自然语言解释。
@@ -73,13 +78,14 @@ cloudflared tunnel --url http://localhost:8501
 #    一次完整验证：HTTP 200、首屏正常渲染；验证后隧道已关闭）。
 ```
 
-**界面体验（v1.4 前端优化）**：
+**界面体验（v1.5 向导式上传重构）**：
 
-- **首屏聚焦**：场景说明下方为卡片式来源选择（示例批次 / 上传PDF），配四步流程指示器（选择/上传 → 核对识别 → 查看报告 → 生成材料），当前步骤高亮；
-- **风险仪表盘**：核验结果以大号环形风险分仪表（0-100，红/黄/绿）为全页视觉焦点，汇总卡与可解释分数构成同屏；
-- **明细分层**：FAIL/WARNING 问题卡片默认展开（含修正建议与规则版本），PASS 项折叠进"全部通过项"，完整明细表二级收纳；
-- **配色统一**：红/黄/绿风险色在仪表盘、明细、建议、知识库各区块使用同一组色值（GRADE_COLORS 唯一定义）；
-- **交互反馈**：OCR 解析有进度条、核验计算/邮件生成/对话回答均有 loading 指示；对话助手收进折叠面板，避免自动聚焦把页面拉离首屏；
+- **向导式上传（一线反馈驱动重构）**：上传模式改为四步引导——① 声明单据构成（每类几份）→ ② 逐类型上传（一份多运单PDF自动拆分，拆分结果需确认，边界不确定时逐页归属由用户裁定）→ ③ 逐份核对识别结果（每份单据独立展示/独立编辑/逐份勾选确认）→ ④ 全部确认后才核验出总评分；
+- **分层核验结果**：总评分（0-100环形仪表）→ 按单据实例分组（发票#1/运单#1/运单#2/…）→ 每份单据的问题卡片（哪个字段、什么问题、怎么改）；无法归属单份单据的批次级问题（缺单证/构成不符）独立分组；
+- **首屏聚焦**：卡片式来源选择（示例批次 / 向导上传）+ 流程步骤指示器，当前步骤高亮；
+- **风险仪表盘**：大号环形风险分仪表（0-100，红/黄/绿）为全页视觉焦点，汇总卡与可解释分数构成同屏；
+- **配色统一**：红/黄/绿风险色在仪表盘、分组、明细、建议、知识库各区块使用同一组色值（GRADE_COLORS 唯一定义）；
+- **Streamlit Deploy 按钮已隐藏**（`.streamlit/config.toml` toolbarMode="viewer" + CSS 双保险），避免使用者误按平台部署入口；
 - **移动端说明**：Streamlit 窄屏下布局可纵向堆叠、无错位（390px 实测），但宽表格体验一般——**移动端请优先使用配套 Android App**，网页端建议 PC 浏览（Streamlit 框架本身的局限，未做深度适配）。
 
 ## 功能总览
@@ -89,20 +95,47 @@ cloudflared tunnel --url http://localhost:8501
 | 模式 | 说明 |
 |---|---|
 | 📁 示例批次 | 3组预置批次（等同"OCR已完成"），可用URL直达如 `?batch=batch_with_issues` |
-| 📎 上传PDF | 上传最多4份PDF发票/箱单/运单/报关单，自动判型提取，**预览表人工纠正后点"开始核验"** |
+| 📎 向导式上传PDF | 四步引导：**声明单据构成 → 逐类型上传（多单据PDF自动拆分）→ 逐份确认识别结果 → 全部确认后核验** |
+
+**多单据PDF拆分（一线反馈驱动，问题一）**：一份PDF里扫描了多份独立单据（如多车厢的3份运单）时，系统按页检测**单据编号出现/单证类型变化**两类信号，把PDF拆解成N份独立单据（`pdf_ingest.split_pdf`），每份独立走提取+校验；**边界不确定**（如同份运单的附页未提取到编号，无法排除漏拆）时 `needs_confirmation=True`，界面给出逐页归属下拉由用户确认边界，系统不擅自猜结果。拆分样本：`sample_pdfs/waybills_x3.pdf`（3份运单混合PDF）。
 
 PDF处理管线（按页路由，同一PDF可混合判型）：文本型PDF直接抽取文字层（毫秒级）；某页可提取字符数 <50 判为扫描页 → 光栅化后 pytesseract OCR（中文包 chi_sim）。**实测耗时**：文本型 0.06s/份；扫描型 OCR 约 1.7s/页；混合型 1.45s（2页）。
 
-- 单证类型自动判断（文件名+内容关键词打分），界面可人工纠正；
+- 单证类型自动判断（文件名+内容关键词打分），向导第2/3步均可人工纠正；
 - 字段提取采用"关键词+正则"定位（按单证类型分别设计规则）；
 - 必需字段提取失败时**显式标记"提取失败/需人工核对"**，绝不静塞错误值给核验引擎。
 
-### 2️⃣ 核验规则（verification_engine.py，14项）
+### 1️⃣⁺ 单据类型规则知识库（doc_rules.yaml，业务可编辑）
+
+每种单据自身的格式/内容合规检查（与跨单据交叉比对互补），规则**全部在 `doc_rules.yaml` 配置文件**（中文注释，含"业务同事如何新增一条规则"的分步说明与字段名对照表），不写死在代码里——业务补充规则（如"运单必须有收货人"）直接编辑YAML、重新核验即生效，不需要懂Python。
+
+- 规则三要素：`doc_type`（适用单证类型）/ `field`（字段）/ `rule_type`（required必填 / format格式 / range数值范围）；
+- `severity`：**fail=硬性不通过（如运单缺收货人直接FAIL，不是待复核）** / warning=待复核；`enabled` 可停用单条规则；
+- 每条规则带 `message`（问题概述）与 `suggestion`（面向作业人员的具体修改建议，原样展示在核验结果与整改邮件里）；
+- 第一批已启用：运单缺收货人(FAIL)、发票缺金额(FAIL)、发票金额非正数(FAIL)、发票缺币种(WARNING)、报关单缺申报金额(FAIL)；**箱单缺毛重**已按模板备好（`enabled: false`）——启用与否待业务确认（启用会改变冻结评估集 eval06 的标注口径，见YAML内注释）；
+- 分工约定：单证编号缺失由引擎 DOC-002 判待复核、整套齐全性由 DOC-001 判定，知识库不重复设规则；
+- 引擎侧每份单据产出一条 `DOC-101 单据规范检查（运单#2）` 结果，字段级问题放在 `field_issues`，供分层展示与整改邮件引用；环境未安装 PyYAML 时自动回退内置默认规则（口径与YAML一致），引擎不中断。
+
+### 1️⃣⁺⁺ 核验结果分层结构（问题四）
+
+核验输出从"一个总分+一张笼统明细表"升级为三层，**网页展示与 `/verify` API 返回同构**：
+
+```
+顶层  总评分 0-100（沿用加权评分与可解释分数构成）
+中层  按单据实例分组：document_groups = [
+        {label: "运单#2", doc_id, fail_count, warning_count,
+         issues: [{check_name, status, detail, field: "gross_weight_kg", suggestion}]} ]
+底层  每条问题 = 哪份单据 + 哪个字段 + 具体修改建议（来自知识库/引擎建议文本）
+      批次级问题单独一组（缺单证/结构异常/实收与申报构成不符）
+```
+
+### 2️⃣ 核验规则（verification_engine.py，14项批级/交叉检查 + 单据级规范检查）
 
 - **输入完整性**：批次结构契约检查（documents元素/fields类型，SYS-001）；
-- **齐全性**：发票/装箱单/运单/报关单/原产地证缺一即 FAIL；单证字段完整性（空单证/缺编号显式告警，DOC-002）；同类型重复单证冲突检查（重复且矛盾判FAIL、完全一致提示去重，DOC-003）；
-- **一致性**：货物描述（语义相似度分级 **+关键实体守卫**：数字/单位/规格/否定词矛盾时无论相似度多高都判不一致）、件数（**整数契约**，0/负数/非数字FAIL、小数待复核）、毛重（1%容差；**数值合法性门槛**：0/负数/NaN判FAIL、带单位字符串判待复核）、收发货人（对OCR空格噪声稳健）、运单号交叉引用（覆盖每一份报关单）、集装箱号、金额（±0.5%；**币种先行**：缺失待复核、矛盾FAIL）；
-- **路线合规**：运单类型**限定受支持枚举**（SMGS / CIM / CIM-SMGS统一运单；枚举外如AIR WAYBILL判"类型不支持，需人工复核"，不进入路线判断）；覆盖集合按运单类型取对应集合，统一运单取SMGS∪CIM**并集**；并集外国家（如美国）判FAIL；每条路线判断结果附带 **rule_version / rule_coverage 字段与适用边界说明**（规则版本 `route-rules v2.0`，仅覆盖中欧班列国际铁路联运25+18国，非全球通用合规判断）；报关单起运/运抵国与运单路线端点核对。
+- **齐全性**：发票/装箱单/运单/报关单/原产地证缺一即 FAIL（DOC-001）；单证字段完整性（空单证/缺编号显式告警，DOC-002）；同类型重复单证冲突检查（DOC-003，重复且矛盾判FAIL、完全一致提示去重；**声明构成感知**：用户在向导第1步申报"运单3份"后，申报份数内的同类型多份按独立单据核验、不再判重复，超出申报份数仍按重复口径处理）；**实收构成与申报构成核对**（DOC-004，向导声明后生效，少传/多传/未申报类型显式告警）；
+- **单据级规范**（DOC-101，按单据实例逐份检查，规则来自 doc_rules.yaml 知识库，见上节）；
+- **一致性**：货物描述（语义相似度分级 **+关键实体守卫**）、件数（整数契约）、毛重（1%容差+数值合法性门槛）、收发货人（对OCR空格噪声稳健）、运单号交叉引用（覆盖每一份报关单）、集装箱号、金额（±0.5%+币种先行）；
+- **路线合规**：运单类型限定受支持枚举（SMGS/CIM/统一运单，枚举外判"类型不支持"）；**对每一份运单独立核验**（多运单批次下问题定位到具体哪份运单）；并集外国家判FAIL、类型自身集合外判WARNING；报关单起运/运抵国与运单路线端点核对；每条路线结果附带 rule_version / rule_coverage（`route-rules v2.0`）。
 
 ### 3️⃣ 语义相似度（semantic.py）
 
@@ -173,9 +206,9 @@ PDF处理管线（按页路由，同一PDF可混合判型）：文本型PDF直�
 
 ### 8️⃣ 工程化
 
-- **API化**：FastAPI `/verify` 接收批次JSON返回核验报告+风险分（`http://localhost:8000/docs` 有Swagger）。**请求体用 Pydantic 模型严格校验**——结构错误（documents含null、fields类型错误等）返回422并指明具体字段，不会500；上传端点有**文件大小（图片10MB/PDF20MB→413）、页数（>20页→413）、处理耗时（>120s→504）三重限制**，OCR等阻塞操作在受限工作线程池执行。Streamlit 优先走API（前后端分离、可被企业系统集成），API未启动自动降级进程内直连并在页面标注当前通道；
+- **API化**：FastAPI `/verify` 接收批次JSON返回核验报告+风险分+**按单据分组的分层结果（document_groups/batch_level_issues）**，可选 `declared_composition` 申报构成（Swagger：`http://localhost:8000/docs`）。**请求体用 Pydantic 模型严格校验**——结构错误返回422并指明具体字段；上传端点有**文件大小（图片10MB/PDF20MB→413）、页数（>20页→413）、处理耗时（>120s→504）三重限制**，OCR等阻塞操作在受限工作线程池执行。新增 **`POST /ingest/pdf/split`** 多单据PDF拆分摄取端点（返回逐份识别结果与 needs_confirmation 边界确认标记，供移动端/集成复用）。Streamlit 优先走API（前后端分离），API未启动自动降级进程内直连并在页面标注当前通道；
 - **数据版本**：邮件草稿、对话会话、PDF报告全部关联**单证内容哈希版本**（`doc_contract.data_version`）——字段编辑/换文件后旧草稿失效并提示重新生成，邮件**下载读取当前编辑后的文本**，上传缓存按**文件名+内容SHA256**判重；
-- **测试**：pytest 共 114 项（引擎+API契约 52 + 风险/语义/评估 23 + PDF摄取 18 + 原生AI/数据版本 21，含 F01-F10 全部审查反例回归）；另有 `selftest.py`（26项验收自测，纯标准库）、`_selftest/live_ai_test.py`（真实LLM实测问答与邮件）与 Playwright 端到端测试；
+- **测试**：pytest 共 135 项（引擎+API契约 54 + 风险/语义/评估 23 + PDF摄取/拆分 19 + 多单据流程/知识库/分层结构 17 + 原生AI/数据版本 22，含 F01-F10 全部审查反例回归）；另有 `selftest.py`（28项验收自测，纯标准库）、`_selftest/upload_e2e.py`（向导式上传端到端）、`_selftest/visual_test.py`（示例批次视觉/交互）、`_selftest/live_ai_test.py`（真实LLM实测，需Key）；
 - **版本管理**：本项目自审查整改起使用 Git 仓库管理，修复按 F0x 分组提交，commit 信息可追溯；容器构建使用多阶段缓存并内置 HEALTHCHECK；APK 重建产物含 `.sha1` 哈希文件；
 - **容器化**：单镜像同时运行 API+网页，内置 tesseract-ocr + 中文包 chi_sim + poppler-utils，`docker build` + `docker run` 即用；`start.sh` 管理 API 进程生命周期（API退出则容器退出，网页不"假活"）；
 - **依赖锁定**：requirements.txt 全部精确锁定实测版本（含上传路由所需 python-multipart、APK分发二维码所需 qrcode）。
@@ -183,12 +216,13 @@ PDF处理管线（按页路由，同一PDF可混合判型）：文本型PDF直�
 ## 自测与验证
 
 ```bash
-python selftest.py                         # 规则引擎+评分+语义 验收自测（26项）
+python selftest.py                         # 规则引擎+评分+语义 验收自测（28项，含分层结构）
 python evaluation.py                       # 冻结留出集评估（只读评估集，输出evaluation_report.md）
 python evaluation.py --rebuild-calibration # 重新生成校准集（写入evaluation_set_calibration/）
-python -m pytest -v                        # 全部单元测试（114项）
-python _selftest/visual_test.py            # 端到端视觉/交互测试（需另行 pip install playwright）
-python _selftest/upload_e2e.py             # 上传PDF模式端到端测试（需playwright）
+python -m pytest -v                        # 全部单元测试（135项）
+python _selftest/visual_test.py            # 示例批次视觉/交互测试（需另行 pip install playwright）
+python _selftest/upload_e2e.py             # 向导式上传端到端测试（声明→拆分→逐份确认→分层结果，需playwright）
+python _selftest/wizard_screenshots.py     # 向导流程汇报截图生成（需playwright）
 python _selftest/live_ai_test.py           # 原生AI功能真实LLM实测（需GLM/ARK API Key）
 python sample_pdfs/generate_samples.py     # 重新生成测试PDF（文本/扫描/混合/缺关键词）
 ```
@@ -218,7 +252,7 @@ ceb_doc_verifier/
 ├── semantic.py                # 语义相似度（字符n-gram TF余弦+关键实体守卫；预留句向量后端）
 ├── llm_layer.py               # LLM协同推理层（预置+实时调用双路径）
 ├── llm_presets.json           # 预置LLM推理结果（离线生成，如实标注来源）
-├── pdf_ingest.py              # PDF摄取：判型/OCR/类型识别/字段解析/置信度(high/review/missing)
+├── pdf_ingest.py              # PDF摄取：判型/OCR/类型识别/字段解析/置信度 + 多单据边界识别与拆分(split_pdf)
 ├── chat_assistant.py          # 对话式核验助手（LLM+工具调用重算+强制计算验证门卫）
 ├── email_generator.py         # AI整改邮件（LLM实时 + 离线模板降级）
 ├── knowledge_base.py          # 合规依据知识库 + 向量检索（RAG-lite）
@@ -226,10 +260,14 @@ ceb_doc_verifier/
 ├── api.py                     # FastAPI /verify 核验服务（Pydantic请求契约+上传限制+线程池）
 ├── start.sh                   # 容器启动脚本（API+网页，API生命周期受管）
 ├── Dockerfile                 # 含OCR系统依赖的容器镜像（HEALTHCHECK）
-├── selftest.py                # 验收自测（26项，纯标准库）
+├── selftest.py                # 验收自测（28项，纯标准库）
+├── doc_rules.yaml             # 单据类型规则知识库（业务可编辑：必填/格式/范围规则+中文注释）
+├── doc_rules.py               # 知识库加载与单据级检查（无PyYAML时回退内置默认规则）
+├── upload_wizard.py           # 向导式上传流程（声明构成→逐类型上传拆分→逐份确认→核验）
+├── .streamlit/config.toml     # Streamlit配置（toolbarMode=viewer 隐藏Deploy按钮）
 ├── evaluation.py              # 量化评估（冻结留出集只读 + 校准集分离 + 多指标报告）
 ├── evaluation_report.md       # 最近一次评估输出（含留出集SHA256）
-├── test_verification_engine.py / test_risk_model.py / test_pdf_ingest.py / test_native_ai.py
+├── test_verification_engine.py / test_risk_model.py / test_pdf_ingest.py / test_native_ai.py / test_multi_doc_flow.py
 ├── mobile_app/                # Flutter Android App（侧载演示版，见 mobile_app/INSTALL.md）
 │   ├── lib/main.dart              # App全部代码（拍照/相册→识别→契约字段编辑→核验结果）
 │   ├── test/                      # Dart单测（6项）
@@ -239,7 +277,7 @@ ceb_doc_verifier/
 ├── sample_data/               # 3组示例批次（全部通过/4类问题/路线告警）
 ├── evaluation_set/            # 19组标注评估批次（冻结留出集，评估只读）
 ├── evaluation_set_calibration/ # 校准集（--rebuild-calibration 时生成）
-├── sample_pdfs/               # 测试PDF与生成器（文本/扫描/混合/缺关键词）
+├── sample_pdfs/               # 测试PDF与生成器（文本/扫描/混合/缺关键词/多运单混合/缺收货人运单）
 ├── requirements.txt
 ├── README.md
 └── _selftest/                 # 开发自测工具（可选，需另行安装playwright）

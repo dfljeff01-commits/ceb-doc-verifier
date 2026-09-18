@@ -27,10 +27,12 @@ EMAIL_PROMPT = (
     "1. 分别输出中文版和英文版（用标记 ===中文=== 和 ===English=== 分隔）；\n"
     "2. 结构包含：问题概述、具体差异点列表（引用真实数值，如发票480箱vs报关单475箱）、"
     "需对方确认或补充的内容、期望回复时间（2个工作日内）；\n"
-    "3. 语气专业克制、对事不对人，不夸大后果；\n"
-    "4. 落款用占位符 [发件人姓名/公司]；\n"
-    "5. 每个差异点都必须与下面提供的核验明细一一对应，不要添加不存在的 问题。\n\n"
-    "【核验明细】\n{details}\n\n【涉及的单证与字段】\n{fields}"
+    "3. 差异点必须按单据分组陈述（如『运单#2』），明确说明是哪一份单据的哪个字段的问题，"
+    "不能笼统带过；\n"
+    "4. 语气专业克制、对事不对人，不夸大后果；\n"
+    "5. 落款用占位符 [发件人姓名/公司]；\n"
+    "6. 每个差异点都必须与下面提供的核验明细一一对应，不要添加不存在的 问题。\n\n"
+    "【核验明细（已按单据分组）】\n{details}\n\n【涉及的单证与字段】\n{fields}"
 )
 
 
@@ -38,10 +40,31 @@ def _collect_problems(verification: dict) -> list[dict]:
     return [r for r in verification["results"] if r["status"] in ("FAIL", "WARNING")]
 
 
+def _grouped_problems(verification: dict) -> list[tuple[str, list[dict]]]:
+    """按单据实例分组取问题（任务书问题四）：返回 [(组标题, 问题列表), ...]。
+    有 document_groups 时按"运单#1/运单#2/批次级"分组，确保邮件能说明
+    "是哪一份单据的问题"；旧结构（无分组）退化为单一组。"""
+    groups = verification.get("document_groups") or []
+    batch_issues = verification.get("batch_level_issues") or []
+    if not groups:
+        return [("全部单证", _collect_problems(verification))]
+    out = []
+    for g in groups:
+        if g.get("issues"):
+            label = g.get("label") or g.get("doc_id", "单据")
+            title = f"{label}（{g.get('doc_id') or g.get('title', '')}）"
+            out.append((title, g["issues"]))
+    if batch_issues:
+        out.append(("批次级问题（整套单证）", batch_issues))
+    return out
+
+
 def _details_text(verification: dict) -> str:
     lines = []
-    for r in _collect_problems(verification):
-        lines.append(f"- [{r['status']}] {r['check_name']}：{r['detail']}")
+    for title, problems in _grouped_problems(verification):
+        lines.append(f"◆ {title}")
+        for r in problems:
+            lines.append(f"- [{r['status']}] {r['check_name']}：{r['detail']}")
     return "\n".join(lines) or "（无）"
 
 
@@ -58,24 +81,35 @@ def _fields_text(verification: dict, documents: list) -> str:
 
 def _template_email(verification: dict, lang: str) -> str:
     problems = _collect_problems(verification)
+    grouped = _grouped_problems(verification)
     risk = verification["risk"]
 
     if lang == "zh":
-        issue_lines = "\n".join(
-            f"  {i}. [{p['status']}] {p['check_name']}：{p['detail']}" for i, p in enumerate(problems, 1))
-        action_lines = "\n".join(
-            f"  {i}. {p.get('suggestion') or '请核对并确认该字段。'}" for i, p in enumerate(problems, 1))
+        issue_lines = []
+        for gi, (title, items) in enumerate(grouped, 1):
+            issue_lines.append(f"▶ {title}")
+            for p in items:
+                issue_lines.append(f"  · [{p['status']}] {p['check_name']}：{p['detail']}")
+        issue_text = "\n".join(issue_lines)
+        action_lines = []
+        for p in problems:
+            sug = p.get("suggestion") or "请核对并确认该字段。"
+            who = ""
+            if p.get("doc_label"):
+                who = f"（{p['doc_label']}）"
+            action_lines.append(f"  · {sug}{who}")
+        action_text = "\n".join(action_lines)
         return f"""主题：【单证核验整改确认】{verification.get('batch_name', '本批次')} —— 发现{len(problems)}项需处理事项（风险分 {risk['score']}/100，{risk['grade_label']}）
 
 尊敬的供应商/货代：
 
-我司在发运前单证交叉核验中发现以下问题（风险评分 {risk['score']}/100，{risk['grade_label']}），请协助确认并回复：
+我司在发运前单证交叉核验中发现以下问题（风险评分 {risk['score']}/100，{risk['grade_label']}），已按单据逐份定位，请协助确认并回复：
 
-一、具体差异点
-{issue_lines}
+一、具体差异点（按单据分组）
+{issue_text}
 
 二、需要贵方确认或补充的内容
-{action_lines}
+{action_text}
 
 请于 2 个工作日内 回复确认上述事项及修正后的单证版本；涉及数值差异的请附称重记录/装箱计数等凭证。为避免口岸滞留产生的额外费用，请务必在货物发运前完成整改。
 
@@ -84,21 +118,29 @@ def _template_email(verification: dict, lang: str) -> str:
 [发件人姓名/公司]
 （本邮件草稿由单证核验系统基于核验明细自动生成，发送前请人工审阅）
 """
-    issue_lines = "\n".join(
-        f"  {i}. [{p['status']}] {p['check_name']}: {p['detail']}" for i, p in enumerate(problems, 1))
-    action_lines = "\n".join(
-        f"  {i}. {(p.get('suggestion') or 'Please verify and confirm this field.')}" for i, p in enumerate(problems, 1))
+    issue_lines = []
+    for title, items in grouped:
+        issue_lines.append(f"> {title}")
+        for p in items:
+            issue_lines.append(f"  - [{p['status']}] {p['check_name']}: {p['detail']}")
+    issue_text = "\n".join(issue_lines)
+    action_lines = []
+    for p in problems:
+        sug = p.get("suggestion") or "Please verify and confirm this field."
+        who = f" (for {p['doc_label']})" if p.get("doc_label") else ""
+        action_lines.append(f"  - {sug}{who}")
+    action_text = "\n".join(action_lines)
     return f"""Subject: [Document Verification Action Required] {verification.get('batch_name', 'This shipment')} - {len(problems)} issue(s) found (Risk score {risk['score']}/100, {risk['grade_label']})
 
 Dear Supplier / Freight Forwarder,
 
-Our pre-shipment cross-verification of shipping documents identified the following issues (risk score {risk['score']}/100, {risk['grade_label']}):
+Our pre-shipment cross-verification of shipping documents identified the following issues (risk score {risk['score']}/100, {risk['grade_label']}), located per document instance:
 
-1. Details of discrepancies
-{issue_lines}
+1. Details of discrepancies (grouped by document)
+{issue_text}
 
 2. Actions required from your side
-{action_lines}
+{action_text}
 
 Kindly confirm the above items and return the corrected document versions within 2 working days. For numerical discrepancies, please attach supporting records (weighbridge tickets / packing counts). Completion before dispatch is essential to avoid border detention costs.
 

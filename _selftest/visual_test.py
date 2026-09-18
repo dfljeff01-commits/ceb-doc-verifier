@@ -34,14 +34,24 @@ def check(name, ok, detail=""):
 
 
 def read_cards(page):
+    """读取汇总迷你卡（.ceb-mini：label 与数值两个子div）。"""
     return page.evaluate("""() => {
-      return [...document.querySelectorAll('div')]
-        .filter(d => (d.style.borderLeftWidth || '') === '6px')
-        .map(d => {
-          const divs = d.querySelectorAll(':scope > div');
-          return (divs[0] ? divs[0].textContent : '') + '=' + (divs[1] ? divs[1].textContent : '');
-        });
+      return [...document.querySelectorAll('.ceb-mini')].map(d => {
+        const divs = d.querySelectorAll(':scope > div');
+        return (divs[1] ? divs[1].textContent : '') + '=' + (divs[0] ? divs[0].textContent : '');
+      });
     }""")
+
+
+def expand_flat_table(page):
+    """展开『完整核验明细表』折叠区，使状态列底色真实渲染（供像素采样）。"""
+    for s in page.locator("summary").all():
+        if "完整核验明细表" in s.inner_text():
+            if "keyboard_arrow_right" in s.inner_text():
+                s.scroll_into_view_if_needed()
+                s.click()
+                page.wait_for_timeout(1500)
+            break
 
 
 def read_alerts(page):
@@ -97,8 +107,13 @@ def main():
         cards = dict(s.split("=", 1) for s in read_cards(page))
         check("卡片 0 FAIL 0 WARNING",
               cards.get("不合格 FAIL") == "0" and cards.get("警告 WARNING") == "0", str(cards))
-        check("卡片 11 项全 PASS", cards.get("通过 PASS") == "11", str(cards))
+        # 19 = 14项批级/交叉检查 + 5份单据各1条单据规范检查（DOC-101，任务书问题三）
+        check("卡片 19 项全 PASS", cards.get("通过 PASS") == "19", str(cards))
         check("场景句显示", "38.7" in page.inner_text("body"))
+        body = page.inner_text("body")
+        check("分层视图：5份单据均无问题标记",
+              body.count("✅ 本份无问题") == 5 and "按单据查看问题" in body, str(body.count("本份无问题")))
+        expand_flat_table(page)
         colors = sample_canvas_colors(page)
         check("表格绿色PASS底色渲染", bool(colors) and colors["PASS_green(#E8F5E9)"] > 500, str(colors))
         # 无误报判定含噪声容差：字体/emoji抗锯齿会产生少量近色像素（实测<300），
@@ -113,11 +128,12 @@ def main():
         cards = dict(s.split("=", 1) for s in read_cards(page))
         check("卡片恰好 4 FAIL 0 WARNING",
               cards.get("不合格 FAIL") == "4" and cards.get("警告 WARNING") == "0", str(cards))
-        alerts = " || ".join(read_alerts(page))
+        alerts = page.inner_text("body")
         check("缺失产地证告警", "原产地证书" in alerts)
         check("货物描述不一致告警", ("货物描述不一致" in alerts) or ("货物描述与多数单证不一致" in alerts))
         check("件数不一致告警(480/475)", "件数不一致" in alerts)
         check("毛重超差告警", "毛重超出1%容差" in alerts)
+        expand_flat_table(page)
         colors = sample_canvas_colors(page)
         check("表格红色FAIL底色渲染", bool(colors) and colors["FAIL_red(#FFEBEE)"] > 500, str(colors))
         page.screenshot(path=str(ART / "batch_B_issues.png"), full_page=True)
@@ -157,8 +173,9 @@ def main():
         cards = dict(s.split("=", 1) for s in read_cards(page))
         check("卡片 0 FAIL 1 WARNING",
               cards.get("不合格 FAIL") == "0" and cards.get("警告 WARNING") == "1", str(cards))
-        alerts = " || ".join(read_alerts(page))
+        alerts = page.inner_text("body")
         check("WARNING 内容：SMGS+土耳其", "SMGS" in alerts and "土耳其" in alerts, alerts[:120])
+        expand_flat_table(page)
         colors = sample_canvas_colors(page)
         check("表格黄色WARNING底色渲染", bool(colors) and colors["WARNING_yellow(#FFF8E1)"] > 500, str(colors))
         page.screenshot(path=str(ART / "batch_C_route_warning.png"), full_page=True)

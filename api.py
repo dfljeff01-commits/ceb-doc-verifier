@@ -4,9 +4,10 @@
 
 端点：
   GET  /health         健康检查
-  POST /verify         批次JSON核验（返回明细+风险评分+建议）
+  POST /verify         批次JSON核验（返回明细+风险评分+建议+按单据分组分层结果）
   POST /ingest/image   图片摄取（App拍照/相册）：OCR → 类型识别 → 字段解析
-  POST /ingest/pdf     PDF摄取：按页判型 → 文本直取/OCR → 字段解析
+  POST /ingest/pdf     PDF摄取：按页判型 → 文本直取/OCR → 字段解析（整份一份单据）
+  POST /ingest/pdf/split  多单据PDF拆分摄取：识别单据边界，逐份返回（任务书问题一）
 
 请求契约（修复 F08）：
   /verify 使用 Pydantic 模型严格校验请求体——结构错误（缺字段、类型错、null、
@@ -31,7 +32,7 @@ import doc_contract
 import pdf_ingest
 from verification_engine import run_verification
 
-API_VERSION = "1.3.0"
+API_VERSION = "1.4.0"
 
 app = FastAPI(
     title="中欧班列单证智能核验 API",
@@ -88,11 +89,15 @@ class DocumentIn(BaseModel):
 
 
 class BatchIn(BaseModel):
-    """批次请求契约（与 sample_data/*.json 同构）。"""
+    """批次请求契约（与 sample_data/*.json 同构）。
+    declared_composition（可选，任务书问题一/二）：用户申报的单据构成
+    {"railway_waybill": 3, ...}——申报后同类型多份不再判"重复单证"，
+    实收与申报不符时产出 DOC-004 告警；不传则维持原有单份口径。"""
     batch_id: str = ""
     batch_name: str = ""
     description: str = ""
     destination_summary: str = ""
+    declared_composition: dict[str, int] | None = None
     documents: list[DocumentIn] = Field(min_length=1, description="至少1份单证")
 
     @field_validator("documents")
@@ -100,6 +105,17 @@ class BatchIn(BaseModel):
     def _documents_non_empty(cls, v):
         if not v:
             raise ValueError("documents 不能为空")
+        return v
+
+    @field_validator("declared_composition")
+    @classmethod
+    def _composition_counts_positive(cls, v):
+        if v is None:
+            return v
+        for doc_type, count in v.items():
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValueError(
+                    f"declared_composition[{doc_type}] 必须是非负整数（收到 {count!r}）")
         return v
 
 
@@ -114,11 +130,17 @@ def health():
 def verify(batch: BatchIn):
     """
     请求体即批次JSON（与 sample_data/*.json 同构）：
-    {"batch_id": "...", "documents": [{"doc_type", "doc_id", "title", "fields": {...}}, ...]}
+    {"batch_id": "...", "documents": [{"doc_type", "doc_id", "title", "fields": {...}}, ...],
+     "declared_composition": {"railway_waybill": 3, ...}}   # 可选申报构成
 
     结构错误（documents 缺失/为空/含null、fields 类型错误等）由 Pydantic 校验
     返回 422，detail 指明具体字段；不做静默修正。
-    返回：results（明细）、summary（计数）、risk（评分+构成）、suggestions（修正建议）。
+    返回：results（明细）、summary（计数）、risk（评分+构成）、suggestions（修正建议），
+    以及按单据实例分组的分层结果（任务书问题四）：
+      document_groups: [{doc_id, label(如"运单#2"), doc_type, fail_count,
+                         warning_count, issues:[{check_id, check_name, status,
+                         detail, field, suggestion}]}],
+      batch_level_issues: [无法归属单份单据的批次级问题]
     """
     return run_verification(batch.model_dump())
 
@@ -164,6 +186,7 @@ async def ingest_image(file: UploadFile = File(...)):
 async def ingest_pdf(file: UploadFile = File(...)):
     """
     PDF摄取：按页判型（文本直取/扫描OCR）→ 类型识别 → 字段解析。
+    整份PDF按一份单据处理；多单据混合PDF请用 /ingest/pdf/split。
     大小限制 413；页数超限 413；处理超时 504（OCR在受限线程池执行）。
     """
     data = await file.read()
@@ -177,3 +200,47 @@ async def ingest_pdf(file: UploadFile = File(...)):
     if r.error and "页数超限" in (r.error or ""):
         raise HTTPException(status_code=413, detail=r.error)
     return _ingest_result_payload(r)
+
+
+@app.post("/ingest/pdf/split")
+async def ingest_pdf_split(file: UploadFile = File(...)):
+    """
+    多单据PDF摄取（任务书问题一）：按页信号识别单据边界，把一份包含多份
+    独立单据（如多份运单）的PDF拆成逐份独立的识别结果。
+
+    返回 groups: [{filename, doc_type, identity_value, page_nos, fields,
+                   field_confidence, needs_review, warnings, document}]，
+    每组可直接并入 /verify 的 documents（document.doc_id 已按页码区分）。
+    needs_confirmation=True 表示边界不确定（如部分页未提取到单据编号），
+    调用方应提示用户人工确认拆分边界，不应直接采用。
+    """
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="上传文件为空")
+    if len(data) > MAX_PDF_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"PDF超过大小限制（{len(data) // 1024 // 1024}MB），请拆分后上传")
+    r = await _run_ingest(pdf_ingest.split_pdf, data, file.filename or "upload.pdf")
+    if r.error and "页数超限" in (r.error or ""):
+        raise HTTPException(status_code=413, detail=r.error)
+    if r.error:
+        raise HTTPException(status_code=422, detail=r.error)
+    return {
+        "filename": r.filename,
+        "needs_confirmation": r.needs_confirmation,
+        "reason": r.reason,
+        "groups": [
+            {
+                "doc_type": g.doc_type,
+                "identity_value": g.identity_value,
+                "page_nos": [p.page_no for p in g.pages],
+                "fields": g.fields,
+                "field_confidence": g.field_confidence,
+                "needs_review": g.needs_review,
+                "warnings": g.warnings,
+                "document": g.to_document(
+                    doc_id_suffix=f"P{g.pages[0].page_no}" if len(r.groups) > 1 else ""),
+            }
+            for g in r.groups
+        ],
+    }

@@ -111,6 +111,8 @@ class IngestResult:
     error: str | None = None
     warnings: list = dc_field(default_factory=list)
     pages_with_ocr_failure: list = dc_field(default_factory=list)   # OCR失败页码（从1开始）
+    identity_value: str | None = None        # 该份单据识别到的单据编号（拆分场景用于展示）
+    split_needs_confirmation: bool = False   # 拆分边界不确定（多单据PDF场景，任务书问题一）
 
     @property
     def needs_review(self) -> bool:
@@ -119,17 +121,21 @@ class IngestResult:
                 or bool(self.pages_with_ocr_failure)
                 or any(v in ("missing", "review") for v in self.field_confidence.values()))
 
-    def to_document(self) -> dict:
+    def to_document(self, doc_id_suffix: str = "") -> dict:
         """转成核验引擎的单证 schema。
-        unknown 类型保留 unknown（需人工指定），不再静默转换成 invoice（修复 F04）。"""
+        unknown 类型保留 unknown（需人工指定），不再静默转换成 invoice（修复 F04）。
+        doc_id_suffix 用于多单据PDF拆分场景区分同一文件的不同单据实例。"""
         titles = {"invoice": "商业发票 Commercial Invoice",
                   "packing_list": "装箱单 Packing List",
                   "railway_waybill": "国际铁路运单 Railway Consignment Note",
                   "export_customs_declaration": "出口报关单 Export Customs Declaration"}
+        stem = Path(self.filename).stem[:24]
+        doc_id = f"PDF-{stem}" + (f"-{doc_id_suffix}" if doc_id_suffix else "")
+        title = titles.get(self.doc_type, f"未识别单证 {self.filename}（需人工指定类型）")
         return {
             "doc_type": self.doc_type,
-            "doc_id": f"PDF-{Path(self.filename).stem[:24]}",
-            "title": titles.get(self.doc_type, f"未识别单证 {self.filename}（需人工指定类型）"),
+            "doc_id": doc_id,
+            "title": title,
             "fields": self.fields,
         }
 
@@ -334,44 +340,248 @@ def extract_fields(doc_type: str, page_texts: list) -> tuple[dict, dict, list]:
     return fields, confidence, warnings
 
 
+def extract_pages(data: bytes, max_pages: int) -> tuple[list, list, list, str | None]:
+    """按页提取文字（文本直取/OCR兜底），供整份处理与多单据拆分共用。
+    返回 (PageResult列表, 警告列表, OCR失败页码列表, 错误或None)。"""
+    pages: list[PageResult] = []
+    warnings: list[str] = []
+    ocr_failed: list[int] = []
+    with pdfplumber.open(__io(data)) as pdf:
+        if len(pdf.pages) > max_pages:
+            return [], [], [], (f"PDF页数超限（{len(pdf.pages)}页 > 上限{max_pages}页），"
+                                f"请拆分后分次上传")
+        for idx, page in enumerate(pdf.pages):
+            text = page.extract_text() or ""
+            chars = len(re.sub(r"\s", "", text))
+            if chars >= TEXT_PAGE_MIN_CHARS:
+                pages.append(PageResult(idx + 1, "text", chars, 0.0, text))
+            else:
+                try:
+                    ocr_text, seconds = _ocr_page(data, idx)
+                except Exception as ocr_exc:
+                    # OCR环境缺失/失败：页面仍标记为ocr，记录警告；
+                    # 该页视为提取失败 → needs_review（修复 F04 静默丢页）
+                    warnings.append(
+                        f"第{idx + 1}页OCR失败（{ocr_exc}），该页文字未提取，结果需人工复核；"
+                        f"请安装 tesseract-ocr + chi_sim（见README）")
+                    ocr_failed.append(idx + 1)
+                    ocr_text, seconds = "", 0.0
+                pages.append(PageResult(idx + 1, "ocr",
+                                        len(re.sub(r"\s", "", ocr_text)),
+                                        seconds, ocr_text))
+    return pages, warnings, ocr_failed, None
+
+
 def process_pdf(data: bytes, filename: str, max_pages: int = MAX_PDF_PAGES) -> IngestResult:
-    """完整管线：判型提取 → 类型识别 → 字段解析。max_pages 为页数上限（F08）。"""
+    """完整管线：判型提取 → 类型识别 → 字段解析。max_pages 为页数上限（F08）。
+    注意：本函数把整份PDF当作一份单据处理；混合多单据PDF请用 split_pdf()
+    先按单据边界拆分（任务书问题一）。"""
     t0 = time.perf_counter()
     result = IngestResult(filename=filename)
     try:
-        with pdfplumber.open(__io(data)) as pdf:
-            if len(pdf.pages) > max_pages:
-                result.error = (f"PDF页数超限（{len(pdf.pages)}页 > 上限{max_pages}页），"
-                                f"请拆分后分次上传")
-                result.elapsed_seconds = time.perf_counter() - t0
-                return result
-            page_texts = []
-            for idx, page in enumerate(pdf.pages):
-                text = page.extract_text() or ""
-                chars = len(re.sub(r"\s", "", text))
-                if chars >= TEXT_PAGE_MIN_CHARS:
-                    page_texts.append(text)
-                    result.pages.append(PageResult(idx + 1, "text", chars, 0.0, text))
-                else:
-                    try:
-                        ocr_text, seconds = _ocr_page(data, idx)
-                    except Exception as ocr_exc:
-                        # OCR环境缺失/失败：页面仍标记为ocr，记录警告；
-                        # 该页视为提取失败 → needs_review（修复 F04 静默丢页）
-                        result.warnings.append(
-                            f"第{idx + 1}页OCR失败（{ocr_exc}），该页文字未提取，结果需人工复核；"
-                            f"请安装 tesseract-ocr + chi_sim（见README）")
-                        result.pages_with_ocr_failure.append(idx + 1)
-                        ocr_text, seconds = "", 0.0
-                    page_texts.append(ocr_text)
-                    result.pages.append(PageResult(idx + 1, "ocr",
-                                                   len(re.sub(r"\s", "", ocr_text)),
-                                                   seconds, ocr_text))
+        pages, warnings, ocr_failed, error = extract_pages(data, max_pages)
+        if error:
+            result.error = error
+            result.elapsed_seconds = time.perf_counter() - t0
+            return result
+        result.pages = pages
+        result.warnings = list(warnings)
+        result.pages_with_ocr_failure = list(ocr_failed)
+        page_texts = [p.text for p in pages]
         result.doc_type, result.type_score = detect_doc_type(filename, "\n".join(page_texts))
         result.fields, result.field_confidence, extract_warnings = extract_fields(
             result.doc_type, page_texts)
         result.warnings.extend(extract_warnings)
     except Exception as exc:  # 单文件失败不影响其他文件
+        result.error = f"{type(exc).__name__}: {exc}"
+    result.elapsed_seconds = time.perf_counter() - t0
+    return result
+
+
+# ---------------------------------------------------------------- 多单据边界识别与拆分（任务书问题一）
+#
+# 一份PDF里可能扫描了多份独立单据（多车厢多份运单/多批货物混扫）。拆分信号：
+#   1. 页面单证类型变化（发票页 → 运单页）；
+#   2. 同类型页面出现"新的单据编号"（两个不同的 WAYBILL NO 即两份运单）。
+# 同类型且无新编号的连续页视为同一份单据的延续（运单正页+附页）。
+# 无法确认时（如后续页完全没提取到编号）needs_confirmation=True，
+# 由界面让用户逐页确认归属，系统不擅自猜边界往下走。
+
+
+@dataclass
+class PageGroup:
+    """一份候选单据：页码集合 + 判定类型 + 组内识别到的单据编号 + 判定依据。"""
+    page_nos: list = dc_field(default_factory=list)       # 从1开始，升序
+    doc_type: str = "unknown"
+    identity_value: str | None = None
+    signals: list = dc_field(default_factory=list)
+
+
+@dataclass
+class SplitResult:
+    """整份PDF的拆分结果：候选分组 + 逐份摄取结果 + 是否需要人工确认边界。"""
+    filename: str
+    pages: list = dc_field(default_factory=list)          # 全部 PageResult（供重新分组复用，不重复OCR）
+    groups: list = dc_field(default_factory=list)         # list[IngestResult]，每组一份单据
+    assignment: list = dc_field(default_factory=list)     # 页(0基) -> 组序号，默认自动拆分结果
+    group_types: list = dc_field(default_factory=list)    # 组序号 -> doc_type（用户可纠正后重建）
+    needs_confirmation: bool = False
+    reason: str = ""
+    error: str | None = None
+    elapsed_seconds: float = 0.0
+
+
+def detect_page_identity(page_text: str, doc_type: str) -> str | None:
+    """在页面文本中查找该类型的单据编号（仅按该类型的编号字段查找，
+    避免把报关单"随附单证-运单号"栏误认成运单页的编号）。"""
+    field = doc_contract.IDENTITY_FIELDS.get(doc_type)
+    if not field:
+        return None
+    for pat in FIELD_RULES.get(doc_type, {}).get(field, []):
+        m = re.search(pat, page_text, re.IGNORECASE)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    return None
+
+
+def detect_doc_groups(pages: list) -> tuple[list, bool, str]:
+    """按页信号把一份PDF拆成候选单据组。
+    返回 (PageGroup列表, needs_confirmation, 原因说明)。"""
+    page_infos = []
+    for p in pages:
+        text = p.text or ""
+        doc_type, score = detect_doc_type("", text)
+        page_infos.append({"page_no": p.page_no, "type": doc_type, "score": score,
+                           "identity": detect_page_identity(text, doc_type) if doc_type != "unknown" else None})
+
+    groups: list[PageGroup] = []
+    for info in page_infos:
+        attach = False
+        if groups:
+            last = groups[-1]
+            same_type = info["type"] != "unknown" and info["type"] == last.doc_type
+            no_new_identity = (info["identity"] is None
+                               or last.identity_value is None
+                               or info["identity"] == last.identity_value)
+            attach = same_type and no_new_identity
+        if attach:
+            last = groups[-1]
+            last.page_nos.append(info["page_no"])
+            if last.identity_value is None and info["identity"]:
+                last.identity_value = info["identity"]
+                last.signals.append(f"第{info['page_no']}页出现单据编号 {info['identity']}")
+        else:
+            g = PageGroup(page_nos=[info["page_no"]], doc_type=info["type"],
+                          identity_value=info["identity"])
+            if info["identity"]:
+                g.signals.append(f"第{info['page_no']}页识别到单据编号 {info['identity']}"
+                                 f"（{doc_contract.DOC_TYPE_LABELS.get(info['type'], info['type'])}）")
+            elif info["type"] != "unknown":
+                g.signals.append(f"第{info['page_no']}页识别为"
+                                 f"{doc_contract.DOC_TYPE_LABELS.get(info['type'], info['type'])}，"
+                                 f"未提取到单据编号")
+            groups.append(g)
+
+    needs, reason = False, ""
+    unknown_pages = [info["page_no"] for info in page_infos if info["type"] == "unknown"]
+    if unknown_pages:
+        needs = True
+        reason = f"第 {'、'.join(map(str, unknown_pages))} 页无法识别单证类型（扫描件OCR失败或非标准模板）"
+    elif len(groups) > 10:
+        needs = True
+        reason = f"自动拆分出 {len(groups)} 份单据，数量异常，请人工确认边界"
+    else:
+        for g in groups:
+            if len(g.page_nos) > 1:
+                later_no_identity = [n for n in g.page_nos[1:]
+                                     if not detect_page_identity(pages[n - 1].text or "", g.doc_type)]
+                if later_no_identity:
+                    needs = True
+                    reason = (f"第 {'、'.join(map(str, g.page_nos))} 页疑似同一份单据，"
+                              f"但其中第 {'、'.join(map(str, later_no_identity))} 页未提取到单据编号，"
+                              f"无法排除是多份单据被漏拆，请人工确认边界")
+                    break
+    return groups, needs, reason
+
+
+def _build_group_result(filename: str, group_pages: list, ocr_failed: list) -> IngestResult:
+    """把一组页面构建为独立的 IngestResult（类型识别+字段解析按组执行）。"""
+    page_texts = [p.text for p in group_pages]
+    doc_type, type_score = detect_doc_type(filename, "\n".join(page_texts))
+    fields, confidence, warnings = extract_fields(doc_type, page_texts)
+    group_failed = [p.page_no for p in group_pages if p.page_no in ocr_failed]
+    return IngestResult(
+        filename=filename,
+        doc_type=doc_type,
+        type_score=type_score,
+        pages=list(group_pages),
+        fields=fields,
+        field_confidence=confidence,
+        warnings=list(warnings),
+        pages_with_ocr_failure=group_failed,
+        identity_value=detect_page_identity("\n".join(page_texts), doc_type),
+    )
+
+
+def rebuild_groups(filename: str, pages: list, assignment: list,
+                   ocr_failed: list, group_types: list | None = None) -> list:
+    """按"页 -> 组"归属关系重建各组摄取结果（用户在界面调整边界/纠正类型后调用）。
+    assignment 为与 pages 等长的组序号列表（0基）。group_types 提供时作为各组类型
+    （人工纠正），否则按组内文本自动识别。"""
+    max_idx = max(assignment) if assignment else 0
+    buckets: list[list] = [[] for _ in range(max_idx + 1)]
+    for page, g_idx in zip(pages, assignment):
+        buckets[g_idx].append(page)
+    results = []
+    for group_pages in buckets:
+        if not group_pages:
+            continue
+        r = _build_group_result(filename, group_pages, set(ocr_failed))
+        if group_types:
+            forced = group_types[len(results)] if len(results) < len(group_types) else None
+            if forced and forced != r.doc_type and forced != "keep":
+                texts = [p.text for p in group_pages]
+                r.fields, r.field_confidence, extra_warn = extract_fields(forced, texts)
+                r.warnings.extend(extra_warn)
+                r.doc_type = forced
+        results.append(r)
+    return results
+
+
+def split_pdf(data: bytes, filename: str, max_pages: int = MAX_PDF_PAGES) -> SplitResult:
+    """多单据PDF摄取入口：逐页提取 → 单据边界识别 → 逐份独立的提取+校验输入。
+    边界不确定时 needs_confirmation=True 并给出原因，由用户确认/调整后
+    用 rebuild_groups() 重建，系统不擅自猜边界（任务书问题一）。"""
+    t0 = time.perf_counter()
+    result = SplitResult(filename=filename)
+    try:
+        pages, warnings, ocr_failed, error = extract_pages(data, max_pages)
+        if error:
+            result.error = error
+            result.elapsed_seconds = time.perf_counter() - t0
+            return result
+        result.pages = pages
+        page_warnings = list(warnings)
+
+        groups, needs, reason = detect_doc_groups(pages)
+        assignment = []
+        for g_idx, g in enumerate(groups):
+            assignment.extend([g_idx] * len(g.page_nos))
+        result.assignment = assignment
+        result.needs_confirmation = needs
+        result.reason = reason
+
+        group_failed = set(ocr_failed)
+        for g_idx, g in enumerate(groups):
+            group_pages = [pages[n - 1] for n in g.page_nos]
+            r = _build_group_result(filename, group_pages, group_failed)
+            r.identity_value = g.identity_value or r.identity_value
+            # 页级警告（OCR失败）归属到对应组
+            r.warnings.extend(w for w in page_warnings
+                              if any(f"第{n}页" in w for n in g.page_nos))
+            r.split_needs_confirmation = needs
+            result.groups.append(r)
+    except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
     result.elapsed_seconds = time.perf_counter() - t0
     return result

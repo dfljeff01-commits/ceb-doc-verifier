@@ -116,12 +116,27 @@ def build_context(verification: dict, documents: list) -> str:
                  "risk": {k: verification["risk"][k] for k in ("score", "grade_label")},
                  "分数构成": [f"{b['reason']} +{b['points']}" for b in verification["risk"]["breakdown"]],
              }, ensure_ascii=False)]
-    parts.append("【未通过项明细】")
-    for r in verification["results"]:
-        if r["status"] != "PASS":
+    parts.append("【未通过项明细（已按单据分组，可回答『哪份单据有什么问题』）】")
+    groups = verification.get("document_groups") or []
+    if groups:
+        for g in groups:
+            if g.get("issues"):
+                parts.append(f"◆ {g.get('label')}（{g.get('doc_id')}）")
+                for r in g["issues"]:
+                    parts.append(f"- {r['check_name']}[{r['status']}] {r['detail']}")
+                    if r.get("suggestion"):
+                        parts.append(f"  建议: {str(r['suggestion'])[:120]}")
+        for r in verification.get("batch_level_issues") or []:
+            parts.append("◆ 批次级（整套单证）")
             parts.append(f"- {r['check_name']}[{r['status']}] {r['detail']}")
             if r.get("suggestion"):
-                parts.append(f"  建议: {r['suggestion'][:120]}")
+                parts.append(f"  建议: {str(r['suggestion'])[:120]}")
+    else:
+        for r in verification["results"]:
+            if r["status"] != "PASS":
+                parts.append(f"- {r['check_name']}[{r['status']}] {r['detail']}")
+                if r.get("suggestion"):
+                    parts.append(f"  建议: {r['suggestion'][:120]}")
     parts.append("【单证字段值（可被simulate工具修改）】")
     for d in documents:
         parts.append(f"- {d.get('doc_type')} ({d.get('doc_id')}): "

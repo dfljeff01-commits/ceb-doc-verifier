@@ -9,6 +9,9 @@ python-multipart==0.0.32
 qrcode==8.2
 pdfplumber==0.11.10
 pymupdf==1.28.2
+# 单据类型规则知识库 doc_rules.yaml 的解析依赖（任务书问题三；缺失时
+# doc_rules 回退内置默认规则，引擎仍可运行）
+pyyaml==6.0.3
 pdf2image==1.17.0
 pytesseract==0.3.13
 pillow==12.3.0

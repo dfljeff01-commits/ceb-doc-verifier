@@ -1,0 +1,132 @@
+# ============================================================================
+# 单据类型规则知识库（业务可编辑，任务书问题三）
+# ============================================================================
+# 本文件定义「每一份单据自身必须满足的规范」，例如"运单必须填写收货人"。
+# 它与跨单据交叉比对规则（verification_engine.py 中的14项检查，如"发票与箱单
+# 毛重一致"）互补：交叉比对管"单证之间对不对得上"，本知识库管"单份单据自
+# 身合不合格"。
+#
+# ──【业务同事如何新增/修改一条规则】──────────────────────────────────────
+#   1. 复制下面任意一条规则块（以 "- rule_id:" 开头、到下一条规则前的整段）；
+#   2. 逐行修改各字段（冒号后面改内容，行首缩进保持与其他规则对齐）：
+#        rule_id     规则唯一标识（英文+下划线，不与现有重复即可）
+#        doc_type    适用的单证类型（见下方"单证类型对照表"）
+#        field       检查的字段名（见下方"字段名对照表"）
+#        rule_type   required = 必填（该字段必须有值）
+#                    format   = 格式（用正则表达式 pattern 描述）
+#                    range    = 数值范围（用 min / max 限定）
+#        severity    fail    = 硬性不通过（核验直接判FAIL）
+#                    warning = 待复核（提示人工确认，不直接判不合格）
+#        message     问题概述（一句话说明哪里不合格）
+#        suggestion  具体修改建议（原样展示在核验结果和整改邮件里，
+#                    请写成作业人员拿到就能动手的一句话）
+#        enabled     true = 启用 / false = 停用（规则保留但不生效）
+#   3. 保存本文件后重新核验即生效，不需要改任何 Python 代码。
+#
+# ──【单证类型对照表】───────────────────────────────────────────────────
+#   invoice                    = 商业发票 Commercial Invoice
+#   packing_list               = 装箱单 Packing List
+#   railway_waybill            = 国际铁路运单 Railway Consignment Note
+#   export_customs_declaration = 出口报关单 Export Customs Declaration
+#   certificate_of_origin      = 原产地证书 Certificate of Origin
+#
+# ──【字段名对照表】─────────────────────────────────────────────────────
+#   invoice_no=发票号        packing_list_no=装箱单号   waybill_no=运单号
+#   declaration_no=报关单编号 co_no=产地证编号
+#   consignor_name=发货人名称 consignee_name=收货人名称
+#   goods_description=货物描述 total_packages=件数（箱数）
+#   gross_weight_kg=毛重(kg)  net_weight_kg=净重(kg)
+#   total_amount=发票总金额   declared_value=报关申报金额 currency=币种
+#   waybill_type=运单类型     route_countries=经停国家（列表）
+#   container_no=集装箱号     departure_country=起运国  destination_country=运抵国
+#
+# ──【与现有引擎检查的分工（避免重复设规则）】─────────────────────────────
+#   - 单证编号（发票号/运单号等）缺失：引擎 DOC-002 已统一判"待复核"，本知识库不重复设；
+#   - 缺哪种单证（整套齐全性）：引擎 DOC-001 判定，本知识库只管"单份单据内部"；
+#   - 跨单据字段一致性（毛重/件数/金额比对等）：引擎 CONS-xxx 判定。
+#
+# ──【修订记录：改本文件时请递增 version 并在此加一行】────────────────────
+#   doc-rules v1.0 (2026-09-19) 第一批规则：按一线反馈（多运单PDF不可解释100分）
+#   梳理。已启用：运单缺收货人/发票缺金额/发票金额非正数/发票缺币种/
+#   报关单缺申报金额；待业务确认后启用：箱单缺毛重（模板已备好，见文末）。
+version: doc-rules v1.0
+
+rules:
+
+  # ============================== 国际铁路运单 ==============================
+  - rule_id: waybill_consignee_required
+    doc_type: railway_waybill
+    field: consignee_name
+    rule_type: required
+    severity: fail
+    message: 运单缺少收货人信息
+    suggestion: 运单缺少收货人，请核实原始单据并补充收货人名称及地址后再提交
+    enabled: true
+
+  # ============================== 商业发票 =================================
+  - rule_id: invoice_total_amount_required
+    doc_type: invoice
+    field: total_amount
+    rule_type: required
+    severity: fail
+    message: 发票缺少总金额
+    suggestion: 发票缺少总金额，请核实原始单据并补填金额合计栏后再提交
+    enabled: true
+
+  - rule_id: invoice_total_amount_positive
+    doc_type: invoice
+    field: total_amount
+    rule_type: range
+    min: 0.01
+    severity: fail
+    message: 发票总金额必须为正数（0或负数不成立）
+    suggestion: 发票总金额为0或负数，请核对金额合计栏与币种，按贸易合同金额更正后重新提交
+    enabled: true
+
+  - rule_id: invoice_currency_required
+    doc_type: invoice
+    field: currency
+    rule_type: required
+    severity: warning
+    message: 发票未填写币种
+    suggestion: 发票未填写币种，无法确认金额口径，请核实后补填币种（如USD/EUR/CNY）
+    enabled: true
+
+  # ============================== 出口报关单 ===============================
+  - rule_id: customs_declared_value_required
+    doc_type: export_customs_declaration
+    field: declared_value
+    rule_type: required
+    severity: fail
+    message: 报关单缺少申报金额
+    suggestion: 报关单缺少申报金额（总价栏），请按发票金额如实补填后重新申报
+    enabled: true
+
+  # ============================== 待启用的规则模板 ==========================
+  # 说明：以下规则已按格式备好，与业务团队确认后把 enabled 改成 true 即生效。
+  #
+  # 【箱单缺毛重】注意：启用前需与架构方确认，并同步重新标注评估集 eval06
+  # （"毛重栏仅发票载明"场景当前标注为低风险通过；启用本规则后该场景将判
+  # FAIL，评估报告的一致率口径会变化，见 evaluation.py）。
+  #
+  # - rule_id: packing_list_gross_weight_required
+  #   doc_type: packing_list
+  #   field: gross_weight_kg
+  #   rule_type: required
+  #   severity: fail
+  #   message: 装箱单缺少毛重
+  #   suggestion: 装箱单缺少毛重，请以衡器记录为准补填毛重（kg）后重新提交
+  #   enabled: false
+  #
+  # 【运单号格式】示例：字母/数字/斜杠/连字符组成、长度≥5。当前各合作承运
+  # 人运单号规则不统一，先以 warning 观察，确认口径后可改 severity: fail。
+  #
+  # - rule_id: waybill_no_format
+  #   doc_type: railway_waybill
+  #   field: waybill_no
+  #   rule_type: format
+  #   pattern: "^[A-Za-z0-9][A-Za-z0-9/\\-]{4,}$"
+  #   severity: warning
+  #   message: 运单号格式异常（应为由字母/数字组成的编号，可含 / 或 -）
+  #   suggestion: 运单号格式异常，请核对是否漏字符或混入了备注文字，按承运人运单为准更正
+  #   enabled: false

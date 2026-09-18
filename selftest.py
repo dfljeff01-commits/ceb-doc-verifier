@@ -34,8 +34,15 @@ def main() -> int:
     v = run_verification(load("batch_clean"))
     check("0 项 FAIL", v["summary"]["fail"] == 0)
     check("0 项 WARNING", v["summary"]["warning"] == 0)
-    check("全部 14 项 PASS（含结构/字段完整性/重复单证检查）",
-          v["summary"]["pass"] == v["summary"]["total"] == 14)
+    # 14 = 结构/齐全性/字段完整性/重复单证 + 9项一致性/路线 + 5份单据各1条单据规范检查（DOC-101）
+    check("全部 19 项 PASS（含结构/字段完整性/重复单证/单据规范检查）",
+          v["summary"]["pass"] == v["summary"]["total"] == 19)
+    # 分层结构（任务书问题四）：按单据实例分组、批次级问题为空
+    check("分层结果：5份单据各自分组且均无问题",
+          len(v["document_groups"]) == 5
+          and all(g["fail_count"] == 0 and g["warning_count"] == 0
+                  for g in v["document_groups"]))
+    check("分层结果：批次级问题为空", v["batch_level_issues"] == [])
 
     # ---- 批次B：精确复现4类问题 ----
     print("== 批次B（含4类问题） ==")

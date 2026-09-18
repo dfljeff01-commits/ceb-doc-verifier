@@ -11,6 +11,10 @@
     scan_packing_list.pdf     扫描型
     mixed_docs.pdf            混合型（第1页文本发票 + 第2页扫描装箱单）
     invoice_missing_weight.pdf 含缺失关键词的文本型（无毛重栏，验证置信度标记）
+    waybills_x3.pdf           多运单混合PDF：3份独立运单（多车厢分批场景，
+                              用于单据边界识别/拆分与逐单据核验的验收场景）
+    waybill_missing_consignee.pdf 缺少收货人栏的运单（单据级规则知识库验收：
+                              应判FAIL并给出"补充收货人"建议）
 
 用法：python sample_pdfs/generate_samples.py
 """
@@ -84,22 +88,27 @@ def draw_packing_list() -> bytes:
     return buf.getvalue()
 
 
-def draw_waybill() -> bytes:
+def draw_waybill(waybill_no: str = "SMU/789456/2026",
+                 consignee: str = "ISTANBUL YAPI SANAYI A.S.",
+                 wagon_no: str = "WGN-6501",
+                 total_packages: str = "480",
+                 gross_weight: str = "12300") -> bytes:
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     c.setFont("STSong-Light", 16)
     c.drawString(180, 800, "国际铁路运单 RAILWAY CONSIGNMENT NOTE")
     _lines(c, 60, 760, [
-        "WAYBILL NO(运单号): SMU/789456/2026",
+        f"WAYBILL NO(运单号): {waybill_no}",
         "WAYBILL TYPE(运单类型): CIM/SMGS统一运单",
         "SHIPPER(发货人): 山西洁康陶瓷制品有限公司",
-        "CONSIGNEE(收货人): ISTANBUL YAPI SANAYI A.S.",
+        f"CONSIGNEE(收货人): {consignee}",
         "FROM(发站): 中国 西安新筑站",
         "TO(到站): 土耳其 伊斯坦布尔 Halkali站",
         "VIA(经由): 中国、哈萨克斯坦、阿塞拜疆、格鲁吉亚、土耳其",
         "DESCRIPTION OF GOODS(货物描述): 陶瓷卫浴洁具",
-        "TOTAL PACKAGES(件数): 480",
-        "GROSS WEIGHT(毛重): 12300 KG",
+        f"TOTAL PACKAGES(件数): {total_packages}",
+        f"GROSS WEIGHT(毛重): {gross_weight} KG",
+        f"WAGON NO(车厢号): {wagon_no}",
         "CONTAINER NO(箱号): TCLU1234567",
     ])
     c.save()
@@ -159,6 +168,18 @@ def make_mixed(text_pdf: bytes, scanned_pdf: bytes) -> bytes:
     return data
 
 
+def make_multi_page(pdf_bytes_list: list) -> bytes:
+    """把多份单页PDF按顺序合并为一份多页PDF（多运单混合PDF的构造方式）。"""
+    out = fitz.open()
+    for data in pdf_bytes_list:
+        src = fitz.open(stream=data, filetype="pdf")
+        out.insert_pdf(src)
+        src.close()
+    merged = out.tobytes()
+    out.close()
+    return merged
+
+
 def main() -> None:
     invoice = draw_invoice()
     invoice_no_w = draw_invoice(missing_weight=True)
@@ -175,6 +196,20 @@ def main() -> None:
     (OUT / "scan_invoice.pdf").write_bytes(scan_invoice)
     (OUT / "scan_packing_list.pdf").write_bytes(scan_packing)
     (OUT / "mixed_docs.pdf").write_bytes(make_mixed(invoice, scan_packing))
+
+    # 多运单混合PDF：同一批货物分3节车厢，3份独立运单（运单号/车厢号/件数/毛重各不相同）
+    waybills = [
+        draw_waybill(waybill_no="SMU/789456/2026", wagon_no="WGN-6501",
+                     total_packages="160", gross_weight="4100"),
+        draw_waybill(waybill_no="SMU/789457/2026", wagon_no="WGN-6502",
+                     total_packages="160", gross_weight="4150"),
+        draw_waybill(waybill_no="SMU/789458/2026", wagon_no="WGN-6503",
+                     total_packages="160", gross_weight="4050"),
+    ]
+    (OUT / "waybills_x3.pdf").write_bytes(make_multi_page(waybills))
+    # 缺收货人的运单（单据级规则知识库验收样本：应判FAIL并给出补充建议）
+    (OUT / "waybill_missing_consignee.pdf").write_bytes(
+        draw_waybill(waybill_no="SMU/789999/2026", consignee=""))
 
     (OUT / "_tmp.pdf").unlink(missing_ok=True)
     print("generated:", sorted(p.name for p in OUT.glob("*.pdf")))

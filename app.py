@@ -22,9 +22,11 @@ import streamlit as st
 
 import chat_assistant
 import doc_contract
+import doc_rules
 import email_generator
 import knowledge_base
 import pdf_ingest
+import upload_wizard
 from llm_endpoint import resolve_endpoint
 
 from verification_engine import (
@@ -121,6 +123,16 @@ div[data-testid="stButton"] > button { border-radius: 10px; }
 .ceb-mini { border-radius:10px; padding:10px 14px; text-align:center; }
 .ceb-mini .v { font-size:26px; font-weight:800; line-height:1.2; }
 .ceb-mini .k { font-size:12px; color:#6B7280; font-weight:600; }
+/* 隐藏Streamlit自带的开发者工具栏/Deploy按钮（任务书问题五；
+   与 .streamlit/config.toml 的 toolbarMode="viewer" 双保险） */
+[data-testid="stToolbar"] { display: none !important; }
+[data-testid="stStatusWidget"] { display: none !important; }
+/* 按单据分组的分层结果卡片（任务书问题四） */
+.ceb-docgroup { border:1px solid #E5E7EB; border-radius:12px; padding:10px 14px;
+    margin:8px 0; background:#FFFFFF; }
+.ceb-docgroup .hd { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.ceb-docgroup .badge { font-size:12px; font-weight:700; border-radius:999px;
+    padding:2px 10px; border:1px solid; }
 </style>
 """
 
@@ -285,9 +297,78 @@ def render_detail_table(results: list) -> None:
     )
 
 
+def render_document_groups(verification: dict) -> None:
+    """按单据实例分组的分层结果（任务书问题四）：
+    中层=每份单据一组（运单#1/运单#2/…），底层=每组内的具体问题
+    （哪个字段、什么问题、怎么改）。批次级问题（缺单证等）单独一组。
+    完整明细表保留在下方折叠视图，两种视图数据同源（document_groups）。"""
+    groups = verification.get("document_groups") or []
+    batch_issues = verification.get("batch_level_issues") or []
+    if not groups:
+        return
+
+    st.markdown("###### 按单据查看问题（每份单据的问题、字段与修改建议）")
+
+    def _issue_card(issue: dict) -> None:
+        meta = STATUS_META.get(issue["status"], STATUS_META[STATUS_WARNING])
+        field_chip = (f'<span style="font-size:11.5px; color:{meta["fg"]}; background:{meta["bg"]};'
+                      f' border:1px solid {meta["fg"]}44; border-radius:999px; padding:1px 8px;'
+                      f' margin-left:6px;">字段：{issue["field"]}</span>'
+                      if issue.get("field") else "")
+        st.markdown(
+            f'<div class="ceb-problem" style="background:{meta["bg"]}; border-color:{meta["fg"]};">'
+            f'<h4 style="color:{meta["fg"]};">{meta["label"]}　{issue["check_name"]}</h4>'
+            f'<div class="d">{issue["detail"]}{field_chip}</div>'
+            + (f'<div class="s">💡 <b>怎么改</b>：{issue["suggestion"]}</div>'
+               if issue.get("suggestion") else "")
+            + "</div>",
+            unsafe_allow_html=True)
+
+    for g in groups:
+        fail_n, warn_n = g.get("fail_count", 0), g.get("warning_count", 0)
+        if fail_n:
+            # 注意：st.expander 标题不渲染HTML，徽章用纯文字+状态符号表达
+            badge = f"⛔ {fail_n} 项不合格"
+        elif warn_n:
+            badge = f"⚠️ {warn_n} 项待复核"
+        else:
+            badge = "✅ 本份无问题"
+        with st.expander(
+                f"📄 {g['label']}　{g.get('title', '')}　（{g.get('doc_id', '')}）　{badge}",
+                expanded=bool(fail_n or warn_n)):
+            if not g["issues"]:
+                st.success("这份单据未发现问题。")
+            for issue in g["issues"]:
+                _issue_card(issue)
+
+    if batch_issues:
+        with st.expander(f"🧾 批次级问题（整套单证共 {len(batch_issues)} 项，"
+                         "如缺单证/结构/构成不符）", expanded=True):
+            for issue in batch_issues:
+                _issue_card(issue)
+    st.caption(f"单据级规范规则版本：{verification.get('doc_rules_version', '—')}"
+               f"（规则定义见 doc_rules.yaml，业务可编辑）")
+
+    # 全部通过项折叠收纳（分层视图只展开问题，通过项不干扰定位）
+    results = verification.get("results") or []
+    passes = [r for r in results if r["status"] == STATUS_PASS]
+    if passes:
+        with st.expander(f"✅ 全部通过项（{len(passes)} 项）——点击展开查看"):
+            rows = [{"检查项": r["check_name"], "类别": r["category"],
+                     "核验说明": r["detail"] or "—"} for r in passes]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                         column_config={
+                             "检查项": st.column_config.Column(width="small"),
+                             "核验说明": st.column_config.Column(width="large"),
+                         })
+    # 完整明细表（平铺视图，与分层视图数据同源；供逐项巡检与存档对照）
+    with st.expander("📋 完整核验明细表（按检查项平铺，含状态底色与涉及单据）", expanded=False):
+        render_detail_table(results)
+
+
 def render_detail_section(results: list) -> None:
-    """核验明细区（P0）：FAIL/WARNING 以问题卡片默认展开，PASS 项折叠收起，
-    完整明细表保留在二级展开器中——避免用户在一堆绿色PASS里找不到问题。"""
+    """核验明细区（旧版扁平视图，保留供调试对照；主流程已改用
+    render_document_groups 的按单据分层视图，任务书问题四）。"""
     problems = [r for r in sort_results_by_severity(results) if r["status"] != STATUS_PASS]
     passes = [r for r in results if r["status"] == STATUS_PASS]
 
@@ -515,6 +596,13 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
     # 数据版本+规则版本入报告（F09/F07：导出材料可追溯到当前数据与规则口径）
     dv = doc_contract.data_version(documents) if documents else "-"
     rule_version = verification.get("rule_version", "")
+    # 单据实例标签（任务书问题四：报告能定位到"哪份单据"）
+    doc_labels = {g.get("doc_id"): g.get("label") for g in (verification.get("document_groups") or [])}
+
+    def _doc_label(doc_id: str) -> str:
+        if doc_id in doc_labels:
+            return f"{doc_labels[doc_id]}（{doc_id}）"
+        return doc_id
 
     title_style = ParagraphStyle("t", fontName=FONT, fontSize=16, leading=22, spaceAfter=4)
     normal_style = ParagraphStyle("n", fontName=FONT, fontSize=9.5, leading=14)
@@ -525,6 +613,9 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
                             leftMargin=1.5 * cm, rightMargin=1.5 * cm,
                             title="中欧班列单证核验报告")
+    _declared = verification.get("declared_composition")
+    _declared_note = ("　|　申报构成：" + "、".join(f"{k}×{v}" for k, v in _declared.items())
+                      if _declared else "")
     story = [
         Paragraph("中欧班列单证智能核验报告",
                   ParagraphStyle("h", parent=title_style, fontSize=17)),
@@ -533,7 +624,8 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
                   f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
                   + (f"　|　⚠️ 含手动修改字段 {edited_count} 处" if edited_count else "")
                   + f"　|　数据版本 {dv}"
-                  + (f"　|　规则版本 {rule_version}" if rule_version else ""),
+                  + (f"　|　规则版本 {rule_version}" if rule_version else "")
+                  + _declared_note,
                   normal_style),
         Spacer(1, 6),
         Paragraph(f"背景：{SCENE_SENTENCE}", small_style),
@@ -560,6 +652,7 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
 
     header = [Paragraph("状态", ParagraphStyle("h1", parent=normal_style, textColor=colors.white)),
               Paragraph("检查项", ParagraphStyle("h2", parent=normal_style, textColor=colors.white)),
+              Paragraph("涉及单据", ParagraphStyle("h2b", parent=normal_style, textColor=colors.white)),
               Paragraph("核验说明", ParagraphStyle("h3", parent=normal_style, textColor=colors.white)),
               Paragraph("AI修正建议", ParagraphStyle("h4", parent=normal_style, textColor=colors.white))]
     data = [header]
@@ -569,13 +662,15 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
     for i, r in enumerate(sort_results_by_severity(verification["results"]), start=1):
         meta = STATUS_META[r["status"]]
         status_fills.append((i, meta["bg"], meta["fg"]))
+        involved = "、".join(_doc_label(d) for d in (r.get("involved_docs") or [])) or "—"
         data.append([
             Paragraph(pdf_status_label[r["status"]], normal_style),
             Paragraph(r["check_name"], normal_style),
+            Paragraph(involved, normal_style),
             Paragraph(r["detail"] or "—", normal_style),
             Paragraph(r.get("suggestion") or "—", normal_style),
         ])
-    table = Table(data, colWidths=[2.2 * cm, 3.8 * cm, 6.0 * cm, 6.0 * cm],
+    table = Table(data, colWidths=[1.8 * cm, 3.4 * cm, 2.6 * cm, 5.1 * cm, 5.1 * cm],
                   repeatRows=1)
     style_cmds = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#374151")),
@@ -634,6 +729,73 @@ def _value_changed(new_value, original) -> bool:
     return doc_contract.canonical_json(new_value) != doc_contract.canonical_json(original)
 
 
+def render_doc_field_editor(batch_id: str, doc: dict) -> tuple[dict, int]:
+    """渲染单份单据的字段编辑控件（F05契约），返回 (合并后的fields, 修改字段数)。
+    供示例批次的整批编辑与向导式上传的逐份确认共用。"""
+    original_fields = dict(doc.get("fields") or {})
+    fields = dict(original_fields)          # 保留全部原始字段（含非编辑字段）
+    edited = 0
+    for key, label, kind, extra in EDITABLE_FIELDS:
+        widget_key = f"fld::{batch_id}::{doc['doc_id']}::{key}"
+        has_original = key in original_fields
+        original = original_fields.get(key)
+        new_value = None
+        included = False
+
+        if kind in ("int", "float"):
+            try:
+                seed = float(original) if has_original else 0.0
+                numeric_seed = seed
+            except (TypeError, ValueError):
+                numeric_seed = None
+            if numeric_seed is None:
+                # 原值不是纯数字（如"12300kg"）：退化为文本框，解析交给引擎口径
+                text = st.text_input(label, value="" if original is None else str(original),
+                                     key=widget_key)
+                new_value = doc_contract.parse_edited_number(text, as_int=(kind == "int"))
+                included = new_value is not None
+            else:
+                step = extra or 1.0
+                value = st.number_input(label, value=numeric_seed,
+                                        min_value=0.0, step=step, key=widget_key)
+                new_value = value if kind == "float" else round(float(value), 2)
+                if kind == "int" and float(new_value).is_integer():
+                    new_value = int(new_value)   # 整数字段保持int类型（不产生12300.0）
+                included = has_original or new_value not in (0, 0.0)
+        elif kind == "select":
+            options = list(extra or [])
+            if has_original and str(original) not in options:
+                options = [str(original)] + options
+            if has_original:
+                value = st.selectbox(label, options,
+                                     index=options.index(str(original)), key=widget_key)
+                new_value, included = value, True
+            else:
+                value = st.selectbox(label, [_WAYBILL_UNSET] + options,
+                                     index=0, key=widget_key)
+                new_value = None if value == _WAYBILL_UNSET else value
+                included = new_value is not None
+        elif kind == "list":
+            display = "、".join(str(x) for x in original) if isinstance(original, list) \
+                else ("" if original is None else str(original))
+            text = st.text_input(label, value=display, key=widget_key)
+            new_value = _serialize_edited_value("list", text)
+            included = new_value is not None
+        else:   # text
+            text = st.text_input(label, value="" if original is None else str(original),
+                                 key=widget_key)
+            new_value = _serialize_edited_value("text", text)
+            included = new_value is not None
+
+        if included:
+            fields[key] = new_value
+        elif has_original:
+            fields.pop(key, None)     # 用户清空该字段 → 显式删除
+        if _value_changed(fields.get(key), original if has_original else None):
+            edited += 1
+    return fields, edited
+
+
 def collect_edited_documents(batch: dict) -> tuple[list, int]:
     """渲染编辑控件并返回合并后的单证列表 + 修改字段数。
     F05：编辑表单来自契约字段定义——缺失字段也渲染控件（可补齐）；
@@ -643,67 +805,9 @@ def collect_edited_documents(batch: dict) -> tuple[list, int]:
     edited = 0
     documents = []
     for doc in batch["documents"]:
-        original_fields = dict(doc.get("fields") or {})
-        fields = dict(original_fields)          # 保留全部原始字段（含非编辑字段）
         with st.expander(f"📄 {_doc_title(doc)}（{doc.get('doc_id', '')}）"):
-            for key, label, kind, extra in EDITABLE_FIELDS:
-                widget_key = f"fld::{batch_id}::{doc['doc_id']}::{key}"
-                has_original = key in original_fields
-                original = original_fields.get(key)
-                new_value = None
-                included = False
-
-                if kind in ("int", "float"):
-                    try:
-                        seed = float(original) if has_original else 0.0
-                        numeric_seed = seed
-                    except (TypeError, ValueError):
-                        numeric_seed = None
-                    if numeric_seed is None:
-                        # 原值不是纯数字（如"12300kg"）：退化为文本框，解析交给引擎口径
-                        text = st.text_input(label, value="" if original is None else str(original),
-                                             key=widget_key)
-                        new_value = doc_contract.parse_edited_number(text, as_int=(kind == "int"))
-                        included = new_value is not None
-                    else:
-                        step = extra or 1.0
-                        value = st.number_input(label, value=numeric_seed,
-                                                min_value=0.0, step=step, key=widget_key)
-                        new_value = value if kind == "float" else round(float(value), 2)
-                        if kind == "int" and float(new_value).is_integer():
-                            new_value = int(new_value)   # 整数字段保持int类型（不产生12300.0）
-                        included = has_original or new_value not in (0, 0.0)
-                elif kind == "select":
-                    options = list(extra or [])
-                    if has_original and str(original) not in options:
-                        options = [str(original)] + options
-                    if has_original:
-                        value = st.selectbox(label, options,
-                                             index=options.index(str(original)), key=widget_key)
-                        new_value, included = value, True
-                    else:
-                        value = st.selectbox(label, [_WAYBILL_UNSET] + options,
-                                             index=0, key=widget_key)
-                        new_value = None if value == _WAYBILL_UNSET else value
-                        included = new_value is not None
-                elif kind == "list":
-                    display = "、".join(str(x) for x in original) if isinstance(original, list) \
-                        else ("" if original is None else str(original))
-                    text = st.text_input(label, value=display, key=widget_key)
-                    new_value = _serialize_edited_value("list", text)
-                    included = new_value is not None
-                else:   # text
-                    text = st.text_input(label, value="" if original is None else str(original),
-                                         key=widget_key)
-                    new_value = _serialize_edited_value("text", text)
-                    included = new_value is not None
-
-                if included:
-                    fields[key] = new_value
-                elif has_original:
-                    fields.pop(key, None)     # 用户清空该字段 → 显式删除
-                if _value_changed(fields.get(key), original if has_original else None):
-                    edited += 1
+            fields, delta = render_doc_field_editor(batch_id, doc)
+            edited += delta
         documents.append({**doc, "fields": fields})
     return documents, edited
 
@@ -735,7 +839,7 @@ st.info(SCENE_SENTENCE, icon="🎯")
 
 # ---------------- 第一步：选择单证来源（P0 卡片式入口） ----------------
 SOURCE_SAMPLE = "📁 示例批次（3组预置模拟数据，一键加载，推荐先看）"
-SOURCE_UPLOAD = "📎 上传PDF单证（自动判型/OCR，可人工纠正）"
+SOURCE_UPLOAD = "📎 上传PDF单证（向导式：声明构成→上传拆分→逐份确认→核验）"
 source_mode = st.radio(
     "第一步 · 选择单证来源",
     [SOURCE_SAMPLE, SOURCE_UPLOAD],
@@ -745,25 +849,7 @@ source_mode = st.radio(
     horizontal=True,
 )
 
-# 流程进度（P1 步骤指示：来自会话状态，首屏默认第1步）
 _mode_upload = source_mode.startswith("📎")
-_uploaded = bool(st.session_state.get("pdf_files"))
-_verified = bool(st.session_state.get("pdf_verified"))
-_materials_used = any(
-    k.startswith(("email_generated_dv::", "chat::")) and v
-    for k, v in st.session_state.items())
-if not _mode_upload:
-    _done, _cur = 2, 3
-elif not _uploaded:
-    _done, _cur = 0, 1
-elif not _verified:
-    _done, _cur = 1, 2
-else:
-    _done, _cur = 2, 3
-if _materials_used and _done < 3:
-    _done, _cur = 3, 4
-render_step_indicator(_done, _cur)
-
 batch = None
 if not _mode_upload:
     labels = [label for _, label in BATCH_FILES]
@@ -789,20 +875,19 @@ if not _mode_upload:
             f'　|　📎 已提取单证：'
             f'{"、".join(d.get("title", d.get("doc_type", "")) for d in batch["documents"])}</span></div>',
             unsafe_allow_html=True)
-else:
-    st.caption("上传发票 / 装箱单 / 铁路运单 / 出口报关单 PDF（最多4份）。"
-               "系统自动判型（文本型直取文字层，扫描页OCR），识别结果可人工纠正后核验。")
-    if not pdf_ingest.ocr_available():
-        st.warning("未检测到本机 tesseract OCR，扫描型PDF将无法识别文字层以外的内容"
-                   "（文本型PDF不受影响）。安装方法见 README。")
-
+    # 流程进度（P1 步骤指示：示例模式沿用四步指示）
+    _materials_used = any(
+        k.startswith(("email_generated_dv::", "chat::")) and v
+        for k, v in st.session_state.items())
+    render_step_indicator(2, 3 if not _materials_used else 4)
 
 # ---------------- PDF 上传模式辅助 ----------------
 
 
 def _file_sig(up_file) -> str:
     """上传文件签名（修复 F09）：文件名 + 内容SHA256。
-    同名同大小但内容不同的文件签名不同，不会误命中旧解析缓存。"""
+    同名同大小但内容不同的文件签名不同，不会误命中旧解析缓存。
+    （向导式上传的缓存签名见 upload_wizard._file_sig，口径一致）"""
     data = None
     getter = getattr(up_file, "getvalue", None)
     if callable(getter):
@@ -815,56 +900,15 @@ def _file_sig(up_file) -> str:
     return f"{up_file.name}:{getattr(up_file, 'size', '?')}"
 
 
-def ingest_uploaded_files(uploads: list) -> list:
-    """处理上传的PDF（带session_state缓存，避免重复OCR）；返回与上传列表对齐的 IngestResult。"""
-    sig_now = [_file_sig(u) for u in uploads]
-    cached = st.session_state.get("pdf_ingest")
-    cached_sigs = st.session_state.get("pdf_ingest_sigs")
-    if cached is not None and cached_sigs == sig_now:
-        return cached
-
-    import pdf_ingest
-    results = []
-    progress = st.progress(0.0, "正在解析上传的PDF单证…")
-    for i, up in enumerate(uploads):
-        data = up.getvalue()
-        r = pdf_ingest.process_pdf(data, up.name)
-        results.append(r)
-        progress.progress((i + 1) / len(uploads))
-    progress.empty()
-    st.session_state["pdf_ingest"] = results
-    st.session_state["pdf_ingest_sigs"] = sig_now
-    st.session_state.pop("pdf_verified", None)   # 新文件需重新点击开始核验
-    return results
-
-
-def ingest_with_type(results: list) -> list:
-    """应用人工纠正的单证类型（类型变了则按新类型重新提取字段）。"""
-    import pdf_ingest
-    corrected = []
-    for r in results:
-        chosen = st.session_state.get(f"pdf_type::{r.filename}", r.doc_type)
-        if chosen != r.doc_type:
-            texts = [p.text for p in r.pages]
-            fields, conf, warnings = pdf_ingest.extract_fields(chosen, texts)
-            r2 = pdf_ingest.IngestResult(
-                filename=r.filename, doc_type=chosen, type_score=r.type_score,
-                pages=r.pages, fields=fields, field_confidence=conf,
-                elapsed_seconds=r.elapsed_seconds, warnings=warnings,
-                pages_with_ocr_failure=r.pages_with_ocr_failure)
-            corrected.append(r2)
-        else:
-            corrected.append(r)
-    return corrected
-
-
 # 侧边栏：功能入口与使用指引（P1：入口整理，不再承担来源选择主交互）
 with st.sidebar:
     st.header("🧭 使用指引")
     st.markdown(
-        "1️⃣ 选择/上传单证　→　2️⃣ 核对识别结果　→　"
-        "3️⃣ 查看核验报告　→　4️⃣ 生成整改材料\n\n"
-        "页面顶部会同步显示当前所在步骤。")
+        "**上传模式（向导式）**\n\n"
+        "① 声明单据构成　→　② 逐类型上传（多单据PDF自动拆分）　→　"
+        "③ 逐份核对确认　→　④ 核验查看分层结果\n\n"
+        "**示例模式**\n\n"
+        "选择批次 → 核对字段 → 查看报告 → 生成整改材料")
     st.divider()
     st.header("🔗 功能入口")
     st.markdown(
@@ -875,102 +919,34 @@ with st.sidebar:
     st.divider()
     st.caption("初级版 v1.4 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同")
 
-# ---------------- 非示例模式的PDF提取区 ----------------
+# ---------------- 向导式上传模式（任务书问题二：声明→上传拆分→逐份确认→核验） ----------------
 
-pdf_verified = None
-if source_mode.startswith("📎"):
-    uploads = st.file_uploader("上传PDF单证（可多选）", type=["pdf"],
-                               accept_multiple_files=True, key="pdf_files")
-    if not uploads:
-        st.session_state.pop("pdf_verified", None)
-    if not uploads:
-        st.info("👆 请先上传PDF单证文件。可使用 `sample_pdfs/` 目录下的示例文件（含文本型/扫描型/混合型）。")
+wizard_batch = None
+edited_documents = None
+edited_count = 0
+if _mode_upload:
+    if not pdf_ingest.ocr_available():
+        st.warning("未检测到本机 tesseract OCR，扫描型PDF将无法提取文字（文本型PDF不受影响）。"
+                   "安装方法见 README。")
+    result = upload_wizard.render_upload_wizard(render_doc_field_editor)
+    if result is None:
         st.stop()
+    wizard_batch, edited_documents, edited_count = result
+    batch = wizard_batch
 
-    with st.spinner("解析PDF中…"):
-        results = ingest_uploaded_files(uploads)
-    results = ingest_with_type(results)
-
-    st.subheader("📥 提取结果预览（模拟OCR → 结构化字段，可纠正）")
-    total_ocr = sum(p.ocr_seconds for r in results for p in r.pages)
-    st.caption(f"耗时：文本页直取（毫秒级）；扫描页OCR合计 {total_ocr:.1f}s"
-               f"（判型阈值：每页可提取字符数 <{pdf_ingest.TEXT_PAGE_MIN_CHARS} 判为扫描页）")
-
-    for r in results:
-        label = f"📄 {r.filename}"
-        with st.expander(label, expanded=True):
-            if r.error:
-                st.error(f"解析失败：{r.error}")
-                continue
-            if r.warnings:
-                for w in r.warnings:
-                    st.warning(w)
-            if r.pages_with_ocr_failure:
-                st.error(f"第 {'、'.join(map(str, r.pages_with_ocr_failure))} 页OCR失败，"
-                         f"该页内容缺失，核验结论不可信，请处理后重新上传或人工补齐。")
-            tcols = st.columns([2, 1])
-            with tcols[0]:
-                st.caption(f"单证类型：自动判断（关键词得分 {r.type_score}）"
-                           + ("　⚠️ 低置信度，请人工确认" if r.type_score < 2 else ""))
-                type_options = ["invoice", "packing_list", "railway_waybill",
-                                "export_customs_declaration", "certificate_of_origin", "unknown"]
-                type_names = {"invoice": "商业发票", "packing_list": "装箱单",
-                              "railway_waybill": "铁路运单", "export_customs_declaration": "出口报关单",
-                              "certificate_of_origin": "原产地证书",
-                              "unknown": "无法识别（需人工指定）"}
-                st.selectbox("单证类型（可纠正）", type_options,
-                             format_func=lambda t: type_names[t],
-                             key=f"pdf_type::{r.filename}",
-                             index=type_options.index(
-                                 st.session_state.get(f"pdf_type::{r.filename}", r.doc_type)))
-            with tcols[1]:
-                page_info = "，".join(
-                    f"P{p.page_no}:{'文本' if p.mode == 'text' else f'OCR {p.ocr_seconds:.1f}s'}"
-                    for p in r.pages)
-                st.caption(f"页面判型：{page_info}")
-
-            rows = ["| 字段 | 提取值 | 置信度 |", "|---|---|---|"]
-            for k, v in sorted(r.field_confidence.items()):
-                mark = {"high": "✅ 高（关键词命中）",
-                        "review": "⚠️ 存疑（规则命中但口径待确认）",
-                        "missing": "⛔ 提取失败/需人工核对"}.get(v, v)
-                rows.append(f"| `{k}` | {r.fields.get(k, '—')} | {mark} |")
-            st.markdown("\n".join(rows))
-            missing = [k for k, v in r.field_confidence.items() if v == "missing"]
-            review = [k for k, v in r.field_confidence.items() if v == "review"]
-            if missing:
-                st.warning("以下必需字段未能提取，请稍后在『单证字段』区人工补齐后再核验："
-                           + "、".join(missing))
-            if review:
-                st.warning("以下字段提取值口径存疑（单位/格式待确认），请人工复核："
-                           + "、".join(review))
-
-    if any(r.error for r in results):
-        st.caption("⚠️ 存在解析失败的文件，已自动跳过。")
-
-    if st.button("▶️ 开始核验（使用上方确认后的提取结果）", type="primary"):
-        st.session_state["pdf_verified"] = True
-    if not st.session_state.get("pdf_verified"):
-        st.info("确认提取结果无误后，点击『开始核验』。")
-        st.stop()
-
-    from pdf_ingest import build_batch
-    batch = build_batch(results)
-    if not batch["documents"]:
-        st.error("没有可核验的单证（全部解析失败）。")
-        st.stop()
-
-st.subheader("2️⃣ 单证字段（提取结果，可手动修改实时复核）")
-edited_documents, edited_count = collect_edited_documents(batch)
-c1, c2, _ = st.columns([1, 2, 3])
-with c1:
-    if st.button("↺ 重置本批次修改", disabled=edited_count == 0):
-        reset_edits(batch)
-with c2:
-    if edited_count:
-        st.markdown(f"<span style='color:#B26A00;font-weight:600;'>"
-                    f"✍️ 已手动修改 {edited_count} 个字段，以下核验结果已实时更新</span>",
-                    unsafe_allow_html=True)
+if not _mode_upload:
+    st.subheader("2️⃣ 单证字段（提取结果，可手动修改实时复核）")
+    # 示例模式：整批编辑（向导模式的逐份编辑已在第3步完成并快照）
+    edited_documents, edited_count = collect_edited_documents(batch)
+    c1, c2, _ = st.columns([1, 2, 3])
+    with c1:
+        if st.button("↺ 重置本批次修改", disabled=edited_count == 0):
+            reset_edits(batch)
+    with c2:
+        if edited_count:
+            st.markdown(f"<span style='color:#B26A00;font-weight:600;'>"
+                        f"✍️ 已手动修改 {edited_count} 个字段，以下核验结果已实时更新</span>",
+                        unsafe_allow_html=True)
 
 # 核验（规则全部来自 verification_engine，本文件只做展示；优先走API，不可用时直连）
 effective_batch = {**batch, "documents": edited_documents}
@@ -979,7 +955,7 @@ with st.spinner("核验计算中…"):
 summary = verification["summary"]
 st.caption("🔌 核验通道：" + (
     f"FastAPI 服务（{API_URL}）—— 前后端分离形态" if verify_mode == "api"
-    else "进程内直连（未检测到核验API服务，启动 `uvicorn api:app --port 8000` 可切换为API形态）"))
+    else "进程内直连（未检测到核验API服务，启动 `uvicorn api:app --port 8000` 可切换为API形态"))
 
 # 核验结果汇总（P0：环形风险仪表为全页视觉焦点；导出按钮放标题行右侧）
 head_left, head_right = st.columns([4, 1])
@@ -998,8 +974,8 @@ with head_right:
     )
 render_risk_dashboard(verification["risk"], summary)
 
-# 核验明细（P0：FAIL/WARNING 默认展开，PASS 折叠）
-render_detail_section(verification["results"])
+# 核验结果（任务书问题四：分层结构——总评分 → 按单据实例分组 → 字段级问题+修改建议）
+render_document_groups(verification)
 render_kb_basis(verification["results"])
 render_ai_reasoning(verification["results"], edited_documents)
 
@@ -1012,7 +988,7 @@ with st.expander("💬 向AI追问（对话式核验助手）——点击展开"
     render_chat_assistant(verification, edited_documents)
 
 # 原始单证数据
-with st.expander("🔍 查看原始单证数据（模拟OCR提取结果JSON）"):
+with st.expander("🔍 查看原始单证数据（识别提取结果JSON）"):
     st.json(edited_documents)
 
 st.divider()
