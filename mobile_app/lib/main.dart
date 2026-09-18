@@ -1,4 +1,4 @@
-// 中欧班列单证智能核验 · Android 演示版（Flutter）
+// 中欧班列单证智能核验 · Android 初级版（Flutter）
 //
 // 功能流（P0）：拍照/相册选图 → 上传后端OCR识别 → 字段预览与人工纠正
 //              → 提交核验 → 风险大卡片 + 明细 + AI修正建议
@@ -782,7 +782,7 @@ class ResultPage extends StatelessWidget {
         ],
         const SizedBox(height: 10),
         const Text(
-          '本工具为竞赛演示Demo：识别为OCR结果（可人工纠正），规则为简化口径，不构成商业/法律依据。',
+          '本工具为初级版（内部试用）：识别为OCR结果（可人工纠正），规则为简化口径，结论供人工复核参考，不构成自动放行或法律依据。',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 11, color: Colors.grey),
         ),
@@ -831,7 +831,7 @@ class _SettingsPageState extends State<SettingsPage> {
               labelText: 'API Base URL',
               hintText: 'http://192.168.x.x:8000',
               border: OutlineInputBorder(),
-              helperText: '填写运行核验后端的电脑局域网IP与端口（演示现场可能不同）',
+              helperText: '填写运行核验后端的电脑局域网IP与端口（以现场网络为准）',
             ),
           ),
           const SizedBox(height: 12),

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-中欧班列单证智能核验 Demo —— Streamlit 前端。
+中欧班列单证智能核验（初级版） —— Streamlit 前端。
 
 数据流：sample_data/*.json（模拟OCR提取结果）
         -> verification_engine.run_verification()（核验规则全部在引擎中，本文件不做规则判断）
@@ -49,7 +49,7 @@ def api_healthy() -> bool:
 
 
 def run_verification_effective(batch: dict) -> tuple[dict, str]:
-    """优先调用核验API（前后端分离形态）；API不可用时降级为进程内直连，保证演示不中断。"""
+    """优先调用核验API（前后端分离形态）；API不可用时降级为进程内直连，保证使用不中断。"""
     if api_healthy():
         try:
             resp = requests.post(f"{API_URL}/verify", json=batch, timeout=10)
@@ -376,7 +376,7 @@ def render_ai_reasoning(results: list, documents: list) -> None:
                 f"**推理过程**：{opinion.get('explanation')}\n\n"
                 f"**建议动作**：{opinion.get('action')}\n\n"
                 f"<span style='font-size:11px; color:#6B7280;'>来源：{source_badge} · {opinion.get('llm', '')}"
-                f" —— demo为保证稳定性采用预置结果，配置 ARK_API_KEY 后未命中的场景将实时调用</span>",
+                f" —— 当前版本为保证稳定性采用预置推理结果，配置 ARK_API_KEY 后未命中的场景将实时调用</span>",
                 unsafe_allow_html=True,
             )
         else:
@@ -526,7 +526,7 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
                             leftMargin=1.5 * cm, rightMargin=1.5 * cm,
                             title="中欧班列单证核验报告")
     story = [
-        Paragraph("中欧班列单证智能核验报告（Demo）",
+        Paragraph("中欧班列单证智能核验报告",
                   ParagraphStyle("h", parent=title_style, fontSize=17)),
         Paragraph(f"批次：{verification['batch_name']}　|　"
                   f"路径：{batch.get('destination_summary', '—')}　|　"
@@ -600,9 +600,9 @@ def build_pdf(batch: dict, verification: dict, edited_count: int,
         story.append(Spacer(1, 8))
 
     story.append(Paragraph(
-        "免责声明：本工具为竞赛演示 Demo，单证数据为模拟OCR结果，核验规则为简化规则集，"
-        "输出不构成任何商业或法律依据。未来可接入真实OCR与AI大模型实现单证自动识别与解释，"
-        "并进一步扩展在途提单融资额度测算等供应链金融能力。",
+        "使用说明：本系统为初级版（内部试用），核验规则为简化规则集（路线规则仅覆盖"
+        "中欧班列国际铁路联运场景，版本见报告头部），识别结果可能存在误差，"
+        "输出供人工复核参考，不构成自动放行或商业/法律依据。系统正基于一线使用反馈持续迭代。",
         small_style))
 
     doc.build(story)
@@ -730,7 +730,7 @@ st.set_page_config(
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
 st.title("🚂 中欧班列单证智能核验")
-st.caption("AI + 多式联运 · 单证交叉核验工具（竞赛Demo）")
+st.caption("AI + 多式联运 · 单证交叉核验工具（初级版 · 内部试用）")
 st.info(SCENE_SENTENCE, icon="🎯")
 
 # ---------------- 第一步：选择单证来源（P0 卡片式入口） ----------------
@@ -768,7 +768,7 @@ batch = None
 if not _mode_upload:
     labels = [label for _, label in BATCH_FILES]
     batch_ids = [fn.removesuffix(".json") for fn, _ in BATCH_FILES]
-    # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与演示
+    # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与培训
     default_index = (
         batch_ids.index(st.query_params["batch"])
         if "batch" in st.query_params and st.query_params["batch"] in batch_ids
@@ -873,7 +873,7 @@ with st.sidebar:
     st.caption("📱 Android App 见项目 mobile_app/INSTALL.md（扫码分发：python serve_apk.py）；"
                "网页端建议 PC 浏览。")
     st.divider()
-    st.caption("Demo 版 v1.4 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同（审查整改后）")
+    st.caption("初级版 v1.4 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同")
 
 # ---------------- 非示例模式的PDF提取区 ----------------
 
@@ -1017,6 +1017,7 @@ with st.expander("🔍 查看原始单证数据（模拟OCR提取结果JSON）")
 
 st.divider()
 st.caption(
-    "本工具为竞赛演示 Demo：OCR 为模拟数据（预置JSON），核验规则为简化规则集，非生产系统；"
-    "后续可替换真实OCR接口与大模型字段抽取，并扩展在途提单融资额度测算等供应链金融能力。"
+    "本系统为初级版（内部试用）：核验规则为简化规则集，路线规则仅覆盖中欧班列国际铁路联运"
+    "场景（每条路线结果附版本与适用范围），识别结果可能存在误差；结论供人工复核参考，"
+    "不构成自动放行依据。欢迎通过一线使用反馈问题与需求，推动系统持续迭代。"
 )

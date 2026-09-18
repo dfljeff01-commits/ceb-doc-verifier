@@ -7,7 +7,7 @@ LLM 协同推理层（升级任务书·方向三）。
 即"中低风险但需要第二意见"的边界案例。
 
 诚实性说明（务必与README口径一致）：
-  - demo 环境为保证现场演示稳定，采用 **预置推理结果**（llm_presets.json），
+  - 当前版本为保证运行稳定，采用 **预置推理结果**（llm_presets.json），
     文本由大模型离线生成；
   - 实时调用路径已实现（call_live_llm，火山方舟 OpenAI 兼容接口）：
     配置环境变量 ARK_API_KEY（可选 ARK_MODEL / ARK_BASE_URL）后，

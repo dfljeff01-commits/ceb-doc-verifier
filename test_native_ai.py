@@ -196,7 +196,8 @@ def test_retrieve_returns_sorted_scores():
 
 
 def test_kb_disclaimer_exists():
-    assert "演示" in knowledge_base.KB_DISCLAIMER
+    assert "非官方全文" in knowledge_base.KB_DISCLAIMER
+    assert "摘录" in knowledge_base.KB_DISCLAIMER
 
 
 # ---------------------------------------------------------------- F09：内容哈希缓存与数据版本
