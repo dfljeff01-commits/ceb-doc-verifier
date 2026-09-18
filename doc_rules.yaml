@@ -1,8 +1,8 @@
 # ============================================================================
-# 单据类型规则知识库（业务可编辑，任务书问题三）
+# 单据类型规则知识库（业务可编辑，任务书问题三 + 必填项全量扩充任务书）
 # ============================================================================
 # 本文件定义「每一份单据自身必须满足的规范」，例如"运单必须填写收货人"。
-# 它与跨单据交叉比对规则（verification_engine.py 中的14项检查，如"发票与箱单
+# 它与跨单据交叉比对规则（verification_engine.py 中的检查，如"发票与箱单
 # 毛重一致"）互补：交叉比对管"单证之间对不对得上"，本知识库管"单份单据自
 # 身合不合格"。
 #
@@ -15,7 +15,7 @@
 #        rule_type   required = 必填（该字段必须有值）
 #                    format   = 格式（用正则表达式 pattern 描述）
 #                    range    = 数值范围（用 min / max 限定）
-#        severity    fail    = 硬性不通过（核验直接判FAIL）
+#        severity    fail    = 硬性不通过（核验直接判FAIL，需整改重新提交）
 #                    warning = 待复核（提示人工确认，不直接判不合格）
 #        message     问题概述（一句话说明哪里不合格）
 #        suggestion  具体修改建议（原样展示在核验结果和整改邮件里，
@@ -39,17 +39,40 @@
 #   total_amount=发票总金额   declared_value=报关申报金额 currency=币种
 #   waybill_type=运单类型     route_countries=经停国家（列表）
 #   container_no=集装箱号     departure_country=起运国  destination_country=运抵国
+#   departure_station=起运站  destination_station=目的站
+#   issuer=签发机构           origin_country=原产国      hs_code=HS编码
+#   invoice_date=发票日期     unit_price=单价            incoterm=价格条款(Incoterms)
+#   contract_no=合同号        package_type=包装方式      marks=唛头
+#   reference_invoice_no=对应发票号
 #
-# ──【与现有引擎检查的分工（避免重复设规则）】─────────────────────────────
-#   - 单证编号（发票号/运单号等）缺失：引擎 DOC-002 已统一判"待复核"，本知识库不重复设；
-#   - 缺哪种单证（整套齐全性）：引擎 DOC-001 判定，本知识库只管"单份单据内部"；
-#   - 跨单据字段一致性（毛重/件数/金额比对等）：引擎 CONS-xxx 判定。
+# ──【与现有引擎检查的分工与叠加口径】─────────────────────────────────────
+#   - 缺整套中哪种单证：引擎 DOC-001 判定，本知识库不重复设；
+#   - 单证编号（发票号/运单号等）缺失：引擎 DOC-002 会给"待复核"提示；
+#     按业务口径（2026-09 必填项扩充），编号是单据唯一标识，缺失在本知识库
+#     升级为 FAIL——同一问题会同时出现 DOC-002（待复核）与 DOC-101（不合格）
+#     两条提示，以更严者（FAIL）为准，属预期行为；
+#   - 跨单据字段一致性（毛重/件数/金额比对等）：引擎 CONS-xxx 判定；
+#   - 运单类型枚举外（如AIR WAYBILL）：引擎 ROUTE-001 判"类型不支持"；
+#     类型栏完全未填则由本知识库判 FAIL。
+#
+# ──【启用状态说明（重要）】──────────────────────────────────────────────
+#   规则分两批：
+#   · enabled: true 的规则已与现有冻结评估集（evaluation_set/ 19组）口径对齐，
+#     全部通过实测评估；
+#   · enabled: false 的"待启用"规则，均为冻结评估集的单证数据**结构性未载明**
+#     该字段（如19组报关单均无HS编码栏）——直接启用会使全部评估案例新增
+#     FAIL/WARNING、一致率失真。按约定需业务侧先决定是否重建/重新标注评估集，
+#     确认后把 enabled 改为 true 即生效（规则内容已按业务口径写好）。
 #
 # ──【修订记录：改本文件时请递增 version 并在此加一行】────────────────────
-#   doc-rules v1.0 (2026-09-19) 第一批规则：按一线反馈（多运单PDF不可解释100分）
-#   梳理。已启用：运单缺收货人/发票缺金额/发票金额非正数/发票缺币种/
-#   报关单缺申报金额；待业务确认后启用：箱单缺毛重（模板已备好，见文末）。
-version: doc-rules v1.0
+#   doc-rules v1.0 (2026-09-19) 第一批规则：运单缺收货人/发票缺金额等。
+#   doc-rules v2.0 (2026-09-19) 必填项全量扩充（业务侧确认"缺必要项必须呈现
+#   为具体问题"）：① 启用箱单缺毛重=FAIL；② 按 CTO 国际贸易实务清单补全
+#   五类单据 FAIL 级必填规则（评估集已验证兼容）；③ 新增WARNING级规则
+#   （净重/经停国/产地证收货人/签发机构）；④ 发票日期、HS编码、原产国声明、
+#   单价、Incoterms、合同号、唛头、包装方式、对应发票号等因冻结评估集结构性
+#   未载明，按"待启用"处理（见各规则处注释），待业务侧决定重建评估集后启用。
+version: doc-rules v2.0
 
 rules:
 
@@ -63,7 +86,133 @@ rules:
     suggestion: 运单缺少收货人，请核实原始单据并补充收货人名称及地址后再提交
     enabled: true
 
+  - rule_id: waybill_consignor_required
+    doc_type: railway_waybill
+    field: consignor_name
+    rule_type: required
+    severity: fail
+    message: 运单缺少发货人信息
+    suggestion: 运单缺少发货人，请核实原始单据并补充发货人名称及地址后再提交
+    enabled: true
+
+  - rule_id: waybill_no_required
+    doc_type: railway_waybill
+    field: waybill_no
+    rule_type: required
+    severity: fail
+    message: 运单缺少运单号
+    suggestion: 运单缺少运单号，无法追溯与交叉核对，请按承运人签发的运单补填运单号后再提交
+    enabled: true
+
+  - rule_id: waybill_type_required
+    doc_type: railway_waybill
+    field: waybill_type
+    rule_type: required
+    severity: fail
+    message: 运单未填写运单类型（CIM/SMGS/统一运单）
+    suggestion: 运单未填写运单类型，无法进行路线合规判断，请按实际适用的运单类型（SMGS国际货协运单/CIM国际铁路运单/CIM-SMGS统一运单）补填后再提交
+    enabled: true
+
+  - rule_id: waybill_departure_station_required
+    doc_type: railway_waybill
+    field: departure_station
+    rule_type: required
+    severity: fail
+    message: 运单缺少起运站
+    suggestion: 运单缺少起运站（发站），无法确认运输起点，请按承运人运单补填发站名称及所在国家后再提交
+    enabled: true
+
+  - rule_id: waybill_destination_station_required
+    doc_type: railway_waybill
+    field: destination_station
+    rule_type: required
+    severity: fail
+    message: 运单缺少目的站
+    suggestion: 运单缺少目的站（到站），无法确认运输终点，请按承运人运单补填到站名称及所在国家后再提交
+    enabled: true
+
+  - rule_id: waybill_description_required
+    doc_type: railway_waybill
+    field: goods_description
+    rule_type: required
+    severity: fail
+    message: 运单缺少货物描述
+    suggestion: 运单缺少货物描述，无法与发票/报关单核对品名一致性，请补充货物名称及规格后再提交
+    enabled: true
+
+  - rule_id: waybill_packages_required
+    doc_type: railway_waybill
+    field: total_packages
+    rule_type: required
+    severity: fail
+    message: 运单缺少件数
+    suggestion: 运单缺少件数（箱数），无法进行口岸件数核对，请按实际装箱计数补填后再提交
+    enabled: true
+
+  - rule_id: waybill_gross_weight_required
+    doc_type: railway_waybill
+    field: gross_weight_kg
+    rule_type: required
+    severity: fail
+    message: 运单缺少毛重
+    suggestion: 运单缺少毛重，请以衡器记录为准补填总毛重（kg）后重新提交
+    enabled: true
+
+  - rule_id: waybill_route_countries_required
+    doc_type: railway_waybill
+    field: route_countries
+    rule_type: required
+    severity: warning
+    message: 运单未填写经停国家/过境信息，路线合规判断可能不完整
+    suggestion: 运单未填写经停国家（换装/过境信息），路线合规判断可能不完整，请按实际运输路径补填经由国家后重新核验
+    enabled: true
+
   # ============================== 商业发票 =================================
+  - rule_id: invoice_consignor_required
+    doc_type: invoice
+    field: consignor_name
+    rule_type: required
+    severity: fail
+    message: 发票缺少发货人信息
+    suggestion: 发票缺少发货人（卖方）名称及地址，无法确认交易主体，请核实原始单据并补充后再提交
+    enabled: true
+
+  - rule_id: invoice_consignee_required
+    doc_type: invoice
+    field: consignee_name
+    rule_type: required
+    severity: fail
+    message: 发票缺少收货人信息
+    suggestion: 发票缺少收货人（买方）名称及地址，无法确认交易主体，请核实原始单据并补充后再提交
+    enabled: true
+
+  - rule_id: invoice_no_required
+    doc_type: invoice
+    field: invoice_no
+    rule_type: required
+    severity: fail
+    message: 发票缺少发票号码
+    suggestion: 发票缺少发票号码，单据无法追溯，请按原始发票补填发票号后再提交
+    enabled: true
+
+  - rule_id: invoice_description_required
+    doc_type: invoice
+    field: goods_description
+    rule_type: required
+    severity: fail
+    message: 发票缺少货物描述
+    suggestion: 发票缺少货物描述/规格，无法进行全套单证品名一致性核对，请补充货物名称及规格后再提交
+    enabled: true
+
+  - rule_id: invoice_packages_required
+    doc_type: invoice
+    field: total_packages
+    rule_type: required
+    severity: fail
+    message: 发票缺少件数
+    suggestion: 发票缺少数量/件数，无法与其他单证核对，请按交易明细补填总件数后再提交
+    enabled: true
+
   - rule_id: invoice_total_amount_required
     doc_type: invoice
     field: total_amount
@@ -92,7 +241,174 @@ rules:
     suggestion: 发票未填写币种，无法确认金额口径，请核实后补填币种（如USD/EUR/CNY）
     enabled: true
 
+  # ---- 发票·待启用（冻结评估集未载明，启用前需业务侧重建评估集，见文件头说明） ----
+  # 发票日期：影响交易时点认定，业务口径为 FAIL。
+  - rule_id: invoice_date_required
+    doc_type: invoice
+    field: invoice_date
+    rule_type: required
+    severity: fail
+    message: 发票缺少发票日期
+    suggestion: 发票缺少开票日期，影响交易时点认定，请按原始发票补填开票日期后再提交
+    enabled: false
+  # 单价：样品单等场景可能不适用，业务口径先标 WARNING。
+  - rule_id: invoice_unit_price_required
+    doc_type: invoice
+    field: unit_price
+    rule_type: required
+    severity: warning
+    message: 发票未填写单价
+    suggestion: 发票未填写单价，影响金额核对，请核实交易明细后补填单价（样品单等无单价场景请人工确认后忽略）
+    enabled: false
+  # 价格术语：影响费用/风险划分认定。
+  - rule_id: invoice_incoterm_required
+    doc_type: invoice
+    field: incoterm
+    rule_type: required
+    severity: warning
+    message: 发票未填写价格条款（Incoterms，如FOB/CIF）
+    suggestion: 发票未填写价格条款（Incoterms），影响费用与风险划分认定，请核实贸易条款后补填（如FOB/CIF/CIP）
+    enabled: false
+  # 合同号：部分交易无正式合同，不强制。
+  - rule_id: invoice_contract_no_required
+    doc_type: invoice
+    field: contract_no
+    rule_type: required
+    severity: warning
+    message: 发票未填写合同号码
+    suggestion: 发票未填写合同号码，请核实后补填合同号；如本交易无正式合同，请人工确认后忽略
+    enabled: false
+
+  # ============================== 装箱单 ===================================
+  - rule_id: packing_list_consignor_required
+    doc_type: packing_list
+    field: consignor_name
+    rule_type: required
+    severity: fail
+    message: 装箱单缺少发货人信息
+    suggestion: 装箱单缺少发货人信息，无法与发票核对交易主体一致性，请核实原始单据并补充后再提交
+    enabled: true
+
+  - rule_id: packing_list_consignee_required
+    doc_type: packing_list
+    field: consignee_name
+    rule_type: required
+    severity: fail
+    message: 装箱单缺少收货人信息
+    suggestion: 装箱单缺少收货人信息，无法与发票核对交易主体一致性，请核实原始单据并补充后再提交
+    enabled: true
+
+  - rule_id: packing_list_description_required
+    doc_type: packing_list
+    field: goods_description
+    rule_type: required
+    severity: fail
+    message: 装箱单缺少货物描述
+    suggestion: 装箱单缺少货物名称/描述，无法与其他单证核对品名一致性，请补充货物名称后再提交
+    enabled: true
+
+  - rule_id: packing_list_packages_required
+    doc_type: packing_list
+    field: total_packages
+    rule_type: required
+    severity: fail
+    message: 装箱单缺少件数
+    suggestion: 装箱单缺少件数（箱数），无法进行口岸件数核对，请按实际装箱计数补填后再提交
+    enabled: true
+
+  # 箱单缺毛重（2026-09 业务侧确认启用）：即使发票载有毛重，装箱单自身缺失
+  # 毛重仍属不可接受，必须作为具体问题呈现给业务人员整改重新提交。
+  # 对应冻结评估集 eval06 已按新口径重新标注（low → high，理由见评估集文件）。
+  - rule_id: packing_list_gross_weight_required
+    doc_type: packing_list
+    field: gross_weight_kg
+    rule_type: required
+    severity: fail
+    message: 装箱单缺少毛重
+    suggestion: 装箱单缺少毛重信息，请核实原始单据并逐项补充每件/每箱毛重及总毛重后重新提交
+    enabled: true
+
+  - rule_id: packing_list_net_weight_required
+    doc_type: packing_list
+    field: net_weight_kg
+    rule_type: required
+    severity: warning
+    message: 装箱单未填写净重
+    suggestion: 装箱单未填写净重，请核实原始单据后补填净重（kg）；部分品类可只报毛重，如确认适用请人工复核后忽略
+    enabled: true
+
+  # ---- 装箱单·待启用（冻结评估集未载明，启用前需业务侧重建评估集） ----
+  - rule_id: packing_list_package_type_required
+    doc_type: packing_list
+    field: package_type
+    rule_type: required
+    severity: warning
+    message: 装箱单未填写包装方式/规格
+    suggestion: 装箱单未填写包装方式/规格（箱型、尺寸），影响装载核算，请核实后补填
+    enabled: false
+  - rule_id: packing_list_marks_required
+    doc_type: packing_list
+    field: marks
+    rule_type: required
+    severity: warning
+    message: 装箱单未填写唛头/识别标记
+    suggestion: 装箱单未填写唛头/识别标记，现场核对不便，请按实际运输标记补填
+    enabled: false
+  - rule_id: packing_list_reference_invoice_required
+    doc_type: packing_list
+    field: reference_invoice_no
+    rule_type: required
+    severity: warning
+    message: 装箱单未填写对应发票号码
+    suggestion: 装箱单未填写对应发票号码，单据关联追溯困难，请补填对应的商业发票号
+    enabled: false
+
   # ============================== 出口报关单 ===============================
+  - rule_id: customs_consignor_required
+    doc_type: export_customs_declaration
+    field: consignor_name
+    rule_type: required
+    severity: fail
+    message: 报关单缺少发货人（境内发货人）信息
+    suggestion: 报关单缺少发货人（境内发货人）信息，无法进行申报主体核对，请按海关注册信息补填后再提交
+    enabled: true
+
+  - rule_id: customs_consignee_required
+    doc_type: export_customs_declaration
+    field: consignee_name
+    rule_type: required
+    severity: fail
+    message: 报关单缺少收货人（境外收货人）信息
+    suggestion: 报关单缺少收货人（境外收货人）信息，无法进行申报主体核对，请按贸易合同补填后再提交
+    enabled: true
+
+  - rule_id: customs_description_required
+    doc_type: export_customs_declaration
+    field: goods_description
+    rule_type: required
+    severity: fail
+    message: 报关单缺少货物描述（品名及规格）
+    suggestion: 报关单缺少品名及规格，无法进行申报核对与HS归类核验，请补填后再提交
+    enabled: true
+
+  - rule_id: customs_packages_required
+    doc_type: export_customs_declaration
+    field: total_packages
+    rule_type: required
+    severity: fail
+    message: 报关单缺少件数
+    suggestion: 报关单缺少件数（箱数），无法进行口岸核对，请按实际装箱计数补填后再提交
+    enabled: true
+
+  - rule_id: customs_gross_weight_required
+    doc_type: export_customs_declaration
+    field: gross_weight_kg
+    rule_type: required
+    severity: fail
+    message: 报关单缺少毛重
+    suggestion: 报关单缺少毛重，口岸过磅核对将无法进行，请以衡器记录为准补填总毛重（kg）后重新申报
+    enabled: true
+
   - rule_id: customs_declared_value_required
     doc_type: export_customs_declaration
     field: declared_value
@@ -102,31 +418,99 @@ rules:
     suggestion: 报关单缺少申报金额（总价栏），请按发票金额如实补填后重新申报
     enabled: true
 
-  # ============================== 待启用的规则模板 ==========================
-  # 说明：以下规则已按格式备好，与业务团队确认后把 enabled 改成 true 即生效。
-  #
-  # 【箱单缺毛重】注意：启用前需与架构方确认，并同步重新标注评估集 eval06
-  # （"毛重栏仅发票载明"场景当前标注为低风险通过；启用本规则后该场景将判
-  # FAIL，评估报告的一致率口径会变化，见 evaluation.py）。
-  #
-  # - rule_id: packing_list_gross_weight_required
-  #   doc_type: packing_list
-  #   field: gross_weight_kg
-  #   rule_type: required
-  #   severity: fail
-  #   message: 装箱单缺少毛重
-  #   suggestion: 装箱单缺少毛重，请以衡器记录为准补填毛重（kg）后重新提交
-  #   enabled: false
-  #
-  # 【运单号格式】示例：字母/数字/斜杠/连字符组成、长度≥5。当前各合作承运
-  # 人运单号规则不统一，先以 warning 观察，确认口径后可改 severity: fail。
-  #
-  # - rule_id: waybill_no_format
-  #   doc_type: railway_waybill
-  #   field: waybill_no
-  #   rule_type: format
-  #   pattern: "^[A-Za-z0-9][A-Za-z0-9/\\-]{4,}$"
-  #   severity: warning
-  #   message: 运单号格式异常（应为由字母/数字组成的编号，可含 / 或 -）
-  #   suggestion: 运单号格式异常，请核对是否漏字符或混入了备注文字，按承运人运单为准更正
-  #   enabled: false
+  - rule_id: customs_departure_country_required
+    doc_type: export_customs_declaration
+    field: departure_country
+    rule_type: required
+    severity: fail
+    message: 报关单缺少起运国
+    suggestion: 报关单缺少起运国，无法进行路线端点核对，请按实际运输路径补填后再申报
+    enabled: true
+
+  - rule_id: customs_destination_country_required
+    doc_type: export_customs_declaration
+    field: destination_country
+    rule_type: required
+    severity: fail
+    message: 报关单缺少运抵国
+    suggestion: 报关单缺少运抵国，无法进行路线端点核对，请按实际运输路径补填后再申报
+    enabled: true
+
+  # ---- 报关单·待启用（冻结评估集未载明，启用前需业务侧重建评估集） ----
+  # HS编码：报关合规核心字段，业务口径为 FAIL。19组评估案例的报关单均无
+  # HS编码数据，启用前需业务侧决定重建评估集（补充字段数据并重标注）。
+  - rule_id: customs_hs_code_required
+    doc_type: export_customs_declaration
+    field: hs_code
+    rule_type: required
+    severity: fail
+    message: 报关单缺少HS编码
+    suggestion: 报关单缺少HS编码，无法完成商品归类核验，将直接影响报关放行，请按申报货物的归类补填10位HS编码后重新提交
+    enabled: false
+
+  - rule_id: customs_origin_country_required
+    doc_type: export_customs_declaration
+    field: origin_country
+    rule_type: required
+    severity: warning
+    message: 报关单未填写原产地
+    suggestion: 报关单未填写原产地，涉及优惠税率适用时需配合原产地证，请核实后补填
+    enabled: false
+
+  # ============================== 原产地证书 ===============================
+  - rule_id: coo_consignor_required
+    doc_type: certificate_of_origin
+    field: consignor_name
+    rule_type: required
+    severity: fail
+    message: 原产地证缺少出口商信息
+    suggestion: 原产地证缺少出口商/生产商名称，原产地证明主体信息不完整，请核实后补填出口商名称及地址后再提交
+    enabled: true
+
+  - rule_id: coo_description_required
+    doc_type: certificate_of_origin
+    field: goods_description
+    rule_type: required
+    severity: fail
+    message: 原产地证缺少货物描述
+    suggestion: 原产地证缺少货物描述，无法核对原产地适用货物，请补填货物名称及规格后再提交
+    enabled: true
+
+  - rule_id: coo_consignee_required
+    doc_type: certificate_of_origin
+    field: consignee_name
+    rule_type: required
+    severity: warning
+    message: 原产地证未填写收货人
+    suggestion: 原产地证未填写收货人；部分格式（如第三方出口/可转让格式）允许不填，请人工核实原产地证格式后确认或补填
+    enabled: true
+
+  - rule_id: coo_issuer_required
+    doc_type: certificate_of_origin
+    field: issuer
+    rule_type: required
+    severity: warning
+    message: 原产地证未填写签发机构/签章信息
+    suggestion: 原产地证未识别到签发机构/签章信息，证书有效性存疑，请人工核对正本签章（签发机构一般为CCPIT或海关）；文本提取对该栏识别有限，如正本无误请人工确认后忽略
+    enabled: true
+
+  # ---- 原产地证·待启用（冻结评估集未载明，启用前需业务侧重建评估集） ----
+  # HS编码：用于确认原产地规则适用性，业务口径为 FAIL。评估集产地证均无
+  # HS编码数据，启用前需业务侧重建评估集。
+  - rule_id: coo_hs_code_required
+    doc_type: certificate_of_origin
+    field: hs_code
+    rule_type: required
+    severity: fail
+    message: 原产地证缺少HS编码
+    suggestion: 原产地证缺少HS编码，无法确认原产地规则适用性，请按申报归类补填HS编码后再提交
+    enabled: false
+  # 原产国声明：原产地证的核心目的字段，业务口径为 FAIL。
+  - rule_id: coo_origin_country_required
+    doc_type: certificate_of_origin
+    field: origin_country
+    rule_type: required
+    severity: fail
+    message: 原产地证缺少原产国声明
+    suggestion: 原产地证缺少原产国声明，该证即失去证明效力，请核实签发机构补填原产国声明栏后再提交
+    enabled: false

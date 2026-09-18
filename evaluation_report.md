@@ -1,6 +1,6 @@
 # 风险分级量化评估报告
 
-- 评估集：**冻结留出集** 19 组（低/中/高 = 6/7/6），评估只读取、不重新生成不覆盖；文件SHA256前16位见文末，供复核比对
+- 评估集：**冻结留出集** 19 组（低/中/高 = 5/7/7），评估只读取、不重新生成不覆盖；文件SHA256前16位见文末，供复核比对
 - 标注口径（统一后，独立于评分权重）：低=0 FAIL且≤1 WARNING；中=恰好1 FAIL且≤1 WARNING，或0 FAIL且≥2 WARNING（叠加升级）；高=≥2 FAIL，或1 FAIL且≥2 WARNING
 - 校准集：`build_cases()` 生成于 `evaluation_set_calibration/`（权重迭代用，与留出集分离，不参与本报告一致率）
 
@@ -12,8 +12,8 @@
 | 漏报率（模型分级低于标注） | 0/19 |
 | 误报率（模型分级高于标注） | 0/19 |
 | 处理失败率 | 0/19 |
-| 字段识别率（文本型PDF实跑） | 34/34 = 100.0% |
-| 字段待复核率（需人工修正） | 0/34 = 0.0% |
+| 字段识别率（文本型PDF实跑） | 35/35 = 100.0% |
+| 字段待复核率（需人工修正） | 0/35 = 0.0% |
 | PDF处理失败率 | 0/4 |
 
 ## 逐批次判定
@@ -25,7 +25,7 @@
 | eval03_route_composite_ok | CIM/SMGS统一运单走土耳其线（合规） | 低 | 低 | 低 | 0 | 0 | 0 | ✅ |
 | eval04_desc_suspect | 报关单品名换序重述（语义存疑0.78） | 低 | 低 | 低 | 15 | 0 | 1 | ✅ |
 | eval05_cim_on_cis_route | 纯CIM运单经独联体段（覆盖WARNING） | 低 | 低 | 低 | 10 | 0 | 1 | ✅ |
-| eval06_weight_only_invoice | 毛重栏仅发票载明（可比对单证不足WARNING） | 低 | 低 | 低 | 5 | 0 | 1 | ✅ |
+| eval06_weight_only_invoice | 毛重栏仅发票载明（重标注：doc-rules v2.0 启用箱单/运单/报关单缺毛重=FAIL后，本案例为3 FAIL+1 WARNING，按标注口径判高风险；原标注low已废止——业务口径明确"即使发票载有毛重，各单据自身缺失毛重仍不可接受"） | 高 | 高 | 高 | 95 | 3 | 1 | ✅ |
 | eval07_pkg_mismatch | 报关单箱数475≠480 | 中 | 中 | 中 | 25 | 1 | 0 | ✅ |
 | eval08_weight_drift | 装箱单毛重12500超1%容差 | 中 | 中 | 中 | 25 | 1 | 0 | ✅ |
 | eval09_desc_mismatch | 报关单品名错报（语义相似度0.55） | 中 | 中 | 中 | 25 | 1 | 0 | ✅ |
@@ -48,7 +48,7 @@ eval02_route_smgs_turkey.json: 72bca9272d2793df
 eval03_route_composite_ok.json: fc8e6a6950abf2e8
 eval04_desc_suspect.json: 212cdde53a0f99c2
 eval05_cim_on_cis_route.json: 07f936074c6086a9
-eval06_weight_only_invoice.json: b8abe52a3bfaa3fb
+eval06_weight_only_invoice.json: b6fbfcbddd2f9e01
 eval07_pkg_mismatch.json: 28e9352f2f0af4f2
 eval08_weight_drift.json: b13a2df1654fc87d
 eval09_desc_mismatch.json: 26c5ca4a769502a3

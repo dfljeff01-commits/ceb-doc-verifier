@@ -76,7 +76,9 @@ def _merge_pdfs(pages: list) -> bytes:
 
 
 def base_documents() -> list:
-    """一套字段齐全的单证（不含运单，运单由用例自行添加）。"""
+    """一套字段齐全的单证（不含运单，运单由用例自行添加）。
+    字段集与 doc-rules v2.0 知识库必填口径对齐（含装箱单净重、报关单毛重等），
+    保证 DOC-101 在本基线上全部通过。"""
     return [
         {"doc_type": "invoice", "doc_id": "INV-T1", "title": "商业发票",
          "fields": {"invoice_no": "INV-T1", "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
@@ -85,7 +87,7 @@ def base_documents() -> list:
         {"doc_type": "packing_list", "doc_id": "PL-T1", "title": "装箱单",
          "fields": {"packing_list_no": "PL-T1", "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
                     "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
-                    "gross_weight_kg": 12300, "container_no": "MSKU8765432"}},
+                    "gross_weight_kg": 12300, "net_weight_kg": 10800, "container_no": "MSKU8765432"}},
         {"doc_type": "export_customs_declaration", "doc_id": "DEC-T1", "title": "出口报关单",
          "fields": {"declaration_no": "DEC-T1", "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
                     "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
@@ -94,7 +96,7 @@ def base_documents() -> list:
                     "container_no": "MSKU8765432", "departure_country": "中国",
                     "destination_country": "德国"}},
         {"doc_type": "certificate_of_origin", "doc_id": "COO-T1", "title": "原产地证书",
-         "fields": {"co_no": "CCPIT-T1", "consignor_name": "甲公司",
+         "fields": {"co_no": "CCPIT-T1", "consignor_name": "甲公司", "issuer": "中国国际贸易促进委员会（CCPIT）",
                     "consignee_name": "BUYER GMBH", "goods_description": "陶瓷卫浴洁具",
                     "total_packages": 480}},
     ]
@@ -104,6 +106,8 @@ def make_waybill(doc_id: str, no: str, **kw) -> dict:
     doc = {"doc_type": "railway_waybill", "doc_id": doc_id, "title": "铁路运单",
            "fields": {"waybill_no": no, "waybill_type": "SMGS国际货协运单",
                       "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
+                      "departure_station": "中国 西安新筑站",
+                      "destination_station": "德国 杜伊斯堡站",
                       "route_countries": ["中国", "哈萨克斯坦", "俄罗斯", "白俄罗斯", "波兰", "德国"],
                       "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
                       "gross_weight_kg": 12300, "container_no": "MSKU8765432"}}
@@ -279,13 +283,71 @@ def test_invoice_missing_amount_is_fail():
 
 
 def test_disabled_rule_not_enforced():
-    """enabled:false 的规则（如箱单缺毛重模板）不产生任何结果——与冻结评估集兼容。"""
+    """enabled:false 的规则（如报关单HS编码——冻结评估集结构性未载明字段）
+    不产生任何结果；启用开关是业务侧控制口径的唯一入口。"""
     assert doc_rules.check_document({
-        "doc_type": "packing_list",
-        "fields": {"packing_list_no": "PL", "consignor_name": "甲", "consignee_name": "乙",
+        "doc_type": "export_customs_declaration",
+        "fields": {"declaration_no": "DEC", "consignor_name": "甲", "consignee_name": "乙",
                    "goods_description": "陶瓷", "total_packages": 10,
-                   "container_no": "MSKU1234567"},
+                   "gross_weight_kg": 100, "declared_value": 500,
+                   "departure_country": "中国", "destination_country": "德国"},
     })["status"] == doc_rules.STATUS_PASS
+
+
+def test_packing_list_missing_gross_weight_is_fail():
+    """验收场景（业务侧确认启用）：装箱单缺毛重 → FAIL + 指定建议文字。
+    即使发票载有毛重，装箱单自身缺失毛重仍不可通过。"""
+    docs = base_documents()
+    docs[1]["fields"].pop("gross_weight_kg")
+    v = run_verification({"batch_id": "t", "documents": docs})
+    r = next(x for x in v["results"] if x["check_id"] == "DOC-101"
+             and x.get("doc_id") == "PL-T1")
+    assert r["status"] == STATUS_FAIL
+    assert "缺少毛重" in r["suggestion"]
+    assert "逐项补充每件/每箱毛重及总毛重" in r["suggestion"]
+    assert v["risk"]["score"] >= 25
+
+
+@pytest.mark.parametrize("doc_type,field,keyword", [
+    ("invoice", "consignor_name", "发货人"),
+    ("invoice", "goods_description", "货物描述"),
+    ("packing_list", "gross_weight_kg", "毛重"),
+    ("railway_waybill", "departure_station", "起运站"),
+    ("railway_waybill", "destination_station", "目的站"),
+    ("railway_waybill", "waybill_type", "运单类型"),
+    ("export_customs_declaration", "gross_weight_kg", "毛重"),
+    ("export_customs_declaration", "destination_country", "运抵国"),
+    ("certificate_of_origin", "consignor_name", "出口商"),
+    ("certificate_of_origin", "goods_description", "货物描述"),
+])
+def test_missing_required_field_per_doc_type_is_fail(doc_type, field, keyword):
+    """验收：每类单据故意缺一个必填字段 → 该份单据判FAIL且建议含字段关键词
+    （不是笼统提示），其他单据不受牵连。"""
+    docs = base_documents() + [make_waybill("WB-1", "SMU/1/2026")]
+    target = next(d for d in docs if d["doc_type"] == doc_type)
+    target["fields"].pop(field)
+    v = run_verification({"batch_id": "t", "documents": docs})
+    r = next(x for x in v["results"] if x["check_id"] == "DOC-101"
+             and x.get("doc_id") == target["doc_id"])
+    assert r["status"] == STATUS_FAIL, f"{doc_type} 缺 {field} 应判FAIL：{r['detail']}"
+    assert keyword in r["suggestion"], f"建议需指明字段：{r['suggestion']}"
+    assert len(r["field_issues"]) == 1
+    assert r["field_issues"][0]["field"] == field
+    # 其他单据的规范检查不受牵连
+    others = [x for x in v["results"] if x["check_id"] == "DOC-101"
+              and x.get("doc_id") != target["doc_id"]]
+    assert all(x["status"] == STATUS_PASS for x in others)
+
+
+def test_waybill_missing_route_countries_is_warning_not_fail():
+    """经停国缺失按业务口径为WARNING（路线判断能力下降提示），不是FAIL。"""
+    docs = base_documents() + [make_waybill("WB-1", "SMU/1/2026", route_countries=None)]
+    v = run_verification({"batch_id": "t", "documents": docs})
+    r = next(x for x in v["results"] if x["check_id"] == "DOC-101"
+             and x.get("doc_id") == "WB-1")
+    assert r["status"] == STATUS_WARNING
+    assert "路线合规判断可能不完整" in r["suggestion"]
+    assert not any(i["severity"] == "fail" for i in r["field_issues"])
 
 
 def test_rule_config_problems_reported():

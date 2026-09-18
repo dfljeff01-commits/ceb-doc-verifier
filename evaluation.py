@@ -142,7 +142,9 @@ def build_cases() -> list:
              make_docs(desc_customs="卫浴洁具陶瓷制品")),
         case("eval05_cim_on_cis_route", "low", "纯CIM运单经独联体段（覆盖WARNING）",
              make_docs(waybill_type="CIM国际铁路运单")),
-        case("eval06_weight_only_invoice", "low", "毛重栏仅发票载明（可比对单证不足WARNING）",
+        case("eval06_weight_only_invoice", "high",
+             "毛重栏仅发票载明（重标注：doc-rules v2.0 启用箱单/运单/报关单缺毛重=FAIL，"
+             "3 FAIL+1 WARNING 按口径判高）",
              make_docs(gw_fields="only_invoice")),
         # ---------- 中风险：1 FAIL（≤1 WARNING）或 0 FAIL ≥2 WARNING ----------
         case("eval07_pkg_mismatch", "medium", "报关单箱数475≠480", make_docs(pkg_customs=475)),
@@ -232,7 +234,7 @@ PDF_FIELD_EXPECTATIONS = {
                     "total_amount", "currency"],
     "packing_list.pdf": ["packing_list_no", "consignor_name", "consignee_name",
                          "goods_description", "total_packages", "gross_weight_kg",
-                         "container_no"],
+                         "net_weight_kg", "container_no"],
     "waybill.pdf": ["waybill_no", "waybill_type", "consignor_name", "consignee_name",
                     "route_countries", "goods_description", "total_packages",
                     "gross_weight_kg", "container_no"],

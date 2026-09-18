@@ -163,6 +163,8 @@ FIELD_RULES = {
         "goods_description": [r"DESCRIPTION OF GOODS[^:：\n]*[:：][ \t]*(.+)"],
         "total_packages": [r"TOTAL\s*PACKAGES[^:：\n]*[:：][ \t]*([\d,]+(?:\.\d+)?)"],
         "gross_weight_kg": [r"GROSS\s*WEIGHT[^:：\n]*[:：][ \t]*([\d,]+(?:\.\d+)?(?:[ \t]*[A-Za-z\u4e00-\u9fa5]+)?)"],
+        # 净重（doc-rules v2.0 装箱单净重规则的提取配套，样式与毛重一致）
+        "net_weight_kg": [r"NET\s*WEIGHT[^:：\n]*[:：][ \t]*([\d,]+(?:\.\d+)?(?:[ \t]*[A-Za-z\u4e00-\u9fa5]+)?)"],
         "container_no": [r"CONTAINER\s*NO[^:：\n]*[:：][ \t]*([A-Z0-9]+)"],
     },
     "railway_waybill": {
@@ -286,15 +288,16 @@ def _finalize_field(field: str, raw: str) -> tuple[object, str, str | None]:
     无法证明正确的值一律保留原文并标记 review（待人工复核）。"""
     value = raw.strip().rstrip("，,；;。 ")
     if field in NUMERIC_FIELDS:
-        if field == "gross_weight_kg":
+        if field in ("gross_weight_kg", "net_weight_kg"):
+            label = doc_contract.FIELD_LABELS_ZH.get(field, field)
             m = _NUM_WITH_UNIT_RE.match(value)
             num_str, unit = (m.group(1), m.group(2)) if m else (value, "")
             num, err = doc_contract.parse_number(num_str)
             if err == doc_contract.OK:
                 if unit and unit.lower() not in KG_LIKE_UNITS:
-                    return value, "review", f"毛重「{value}」单位不是kg，请人工换算复核"
+                    return value, "review", f"{label}「{value}」单位不是kg，请人工换算复核"
                 return num, "high", None
-            return value, "review", f"毛重「{value}」无法解析为数值，待人工复核"
+            return value, "review", f"{label}「{value}」无法解析为数值，待人工复核"
         num, err = doc_contract.parse_number(value)
         if err == doc_contract.OK:
             if field in doc_contract.INTEGER_FIELDS:

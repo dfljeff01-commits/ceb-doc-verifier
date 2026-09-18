@@ -1,8 +1,8 @@
 {
   "batch_id": "eval06_weight_only_invoice",
   "batch_name": "eval06_weight_only_invoice",
-  "description": "毛重栏仅发票载明（可比对单证不足WARNING）",
-  "ground_truth": "low",
+  "description": "毛重栏仅发票载明（重标注：doc-rules v2.0 启用箱单/运单/报关单缺毛重=FAIL后，本案例为3 FAIL+1 WARNING，按标注口径判高风险；原标注low已废止——业务口径明确\"即使发票载有毛重，各单据自身缺失毛重仍不可接受\"）",
+  "ground_truth": "high",
   "documents": [
     {
       "doc_type": "invoice",

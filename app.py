@@ -159,6 +159,7 @@ EDITABLE_FIELDS = [
     ("goods_description", "货物描述", "text", None),
     ("total_packages", "件数（箱数）", "int", None),
     ("gross_weight_kg", "毛重（kg）", "float", 10.0),
+    ("net_weight_kg", "净重（kg）", "float", 10.0),
     ("consignor_name", "发货人名称", "text", None),
     ("consignee_name", "收货人名称", "text", None),
     ("total_amount", "发票总金额", "float", 100.0),
@@ -170,6 +171,8 @@ EDITABLE_FIELDS = [
     ("container_no", "集装箱号", "text", None),
     ("departure_country", "起运国", "text", None),
     ("destination_country", "运抵国", "text", None),
+    ("departure_station", "起运站（发站）", "text", None),
+    ("destination_station", "目的站（到站）", "text", None),
     ("route_countries", "经停国家（顿号/逗号分隔，保存为列表）", "list", None),
 ]
 

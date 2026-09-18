@@ -96,6 +96,10 @@ FIELD_LABELS_ZH = {
     "container_no": "集装箱号", "departure_country": "起运国",
     "destination_country": "运抵国", "departure_station": "发站",
     "destination_station": "到站", "issuer": "签发机构", "origin_country": "原产国",
+    # 必填项知识库扩充（doc-rules v2.0）：待启用规则涉及的新字段
+    "hs_code": "HS编码", "invoice_date": "发票日期", "unit_price": "单价",
+    "incoterm": "价格条款（Incoterms）", "contract_no": "合同号",
+    "package_type": "包装方式", "marks": "唛头", "reference_invoice_no": "对应发票号",
 }
 
 

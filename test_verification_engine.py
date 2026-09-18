@@ -17,7 +17,9 @@ from verification_engine import (STATUS_FAIL, STATUS_PASS, STATUS_WARNING,
 
 
 def base_documents() -> list:
-    """一份字段齐全、彼此一致的最小单证组。"""
+    """一份字段齐全、彼此一致的最小单证组。
+    字段集与 doc-rules v2.0 知识库的必填口径对齐（装箱单净重、运单发站/到站、
+    产地证签发机构等），保证单据级规范检查（DOC-101）在本基线上全部通过。"""
     return [
         {"doc_type": "invoice", "doc_id": "INV-T1", "title": "商业发票",
          "fields": {"invoice_no": "INV-T1", "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
@@ -26,10 +28,11 @@ def base_documents() -> list:
         {"doc_type": "packing_list", "doc_id": "PL-T1", "title": "装箱单",
          "fields": {"packing_list_no": "PL-T1", "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
                     "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
-                    "gross_weight_kg": 12300, "container_no": "MSKU8765432"}},
+                    "gross_weight_kg": 12300, "net_weight_kg": 10800, "container_no": "MSKU8765432"}},
         {"doc_type": "railway_waybill", "doc_id": "SMU-T1", "title": "铁路运单",
          "fields": {"waybill_no": "SMU/T/2026", "waybill_type": "SMGS国际货协运单",
                     "consignor_name": "甲公司", "consignee_name": "BUYER GMBH",
+                    "departure_station": "中国 西安新筑站", "destination_station": "德国 杜伊斯堡站",
                     "route_countries": ["中国", "哈萨克斯坦", "俄罗斯", "白俄罗斯", "波兰", "德国"],
                     "goods_description": "陶瓷卫浴洁具", "total_packages": 480,
                     "gross_weight_kg": 12300, "container_no": "MSKU8765432"}},
@@ -41,7 +44,7 @@ def base_documents() -> list:
                     "container_no": "MSKU8765432", "departure_country": "中国",
                     "destination_country": "德国"}},
         {"doc_type": "certificate_of_origin", "doc_id": "COO-T1", "title": "原产地证书",
-         "fields": {"co_no": "CCPIT-T1", "consignor_name": "甲公司",
+         "fields": {"co_no": "CCPIT-T1", "consignor_name": "甲公司", "issuer": "中国国际贸易促进委员会（CCPIT）",
                     "consignee_name": "BUYER GMBH", "goods_description": "陶瓷卫浴洁具",
                     "total_packages": 480}},
     ]

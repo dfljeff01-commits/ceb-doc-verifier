@@ -15,6 +15,8 @@
                               用于单据边界识别/拆分与逐单据核验的验收场景）
     waybill_missing_consignee.pdf 缺少收货人栏的运单（单据级规则知识库验收：
                               应判FAIL并给出"补充收货人"建议）
+    packing_missing_weight.pdf 缺少毛重栏的装箱单（doc-rules v2.0 验收：
+                              箱单缺毛重应判FAIL——业务口径：缺毛重不可通过）
 
 用法：python sample_pdfs/generate_samples.py
 """
@@ -69,7 +71,7 @@ def draw_invoice(missing_weight: bool = False) -> bytes:
     return buf.getvalue()
 
 
-def draw_packing_list() -> bytes:
+def draw_packing_list(missing_weight: bool = False) -> bytes:
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     c.setFont("STSong-Light", 16)
@@ -80,10 +82,13 @@ def draw_packing_list() -> bytes:
         "BUYER(收货人): ISTANBUL YAPI SANAYI A.S.",
         "DESCRIPTION OF GOODS(货物描述): 陶瓷卫浴洁具",
         "TOTAL PACKAGES(总件数): 480",
-        "GROSS WEIGHT(毛重): 12300 KG",
         "NET WEIGHT(净重): 10800 KG",
         "CONTAINER NO(箱号): TCLU1234567",
     ])
+    if not missing_weight:
+        # 毛重栏位于净重之后（与真实样张版式一致）
+        c.setFont("STSong-Light", 11)
+        c.drawString(60, 634, "GROSS WEIGHT(毛重): 12300 KG")
     c.save()
     return buf.getvalue()
 
@@ -210,6 +215,8 @@ def main() -> None:
     # 缺收货人的运单（单据级规则知识库验收样本：应判FAIL并给出补充建议）
     (OUT / "waybill_missing_consignee.pdf").write_bytes(
         draw_waybill(waybill_no="SMU/789999/2026", consignee=""))
+    # 缺毛重的装箱单（doc-rules v2.0 验收样本：箱单缺毛重判FAIL）
+    (OUT / "packing_missing_weight.pdf").write_bytes(draw_packing_list(missing_weight=True))
 
     (OUT / "_tmp.pdf").unlink(missing_ok=True)
     print("generated:", sorted(p.name for p in OUT.glob("*.pdf")))
