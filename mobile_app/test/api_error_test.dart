@@ -1,52 +1,45 @@
+// 网络错误映射与弱网重试判定测试。
+// （旧版针对字段编辑契约的用例已随"移除字段编辑界面"一并删除，
+//   编辑序列化能力保留在后端 /ingest/image + 电脑端网页中。）
+import 'dart:async';
 import 'dart:io';
 
 import 'package:ceb_verifier/main.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('网络错误映射为友好提示', () {
-    final msg = friendlyError(const SocketException('refused'));
-    expect(msg, contains('无法连接后端'));
+  group('网络错误 → 现场可读提示', () {
+    test('连接失败提示已暂存+自动重传+检查设置', () {
+      final msg = friendlyError(SocketException('refused'));
+      expect(msg, contains('已暂存'));
+      expect(msg, contains('自动重传'));
+      expect(msg, contains('API地址'));
+    });
+
+    test('超时提示弱网暂存语义', () {
+      final msg = friendlyError(TimeoutException('t'));
+      expect(msg, contains('网络缓慢'));
+      expect(msg, contains('已暂存'));
+    });
+
+    test('后端业务错误（ApiException）原样透传', () {
+      expect(friendlyError(ApiException('照片过大')), '照片过大');
+    });
+
+    test('未知错误兜底', () {
+      expect(friendlyError(StateError('x')), contains('x'));
+    });
   });
 
-  test('DocEntry 转核验引擎文档结构', () {
-    final e = DocEntry(
-      fileName: 'invoice.jpg',
-      docType: 'invoice',
-      fields: {'total_packages': 480},
-      confidence: {'total_packages': 'high'},
-    );
-    final doc = e.toDocument();
-    expect(doc['doc_type'], 'invoice');
-    expect(doc['fields']['total_packages'], 480);
-    expect(e.needsReview, isFalse);
-  });
+  group('弱网重试判定（isRetryable）', () {
+    test('Socket/Timeout/Http错误可重试', () {
+      expect(isRetryable(SocketException('down')), isTrue);
+      expect(isRetryable(TimeoutException('t')), isTrue);
+      expect(isRetryable(HttpException('bad')), isTrue);
+    });
 
-  test('route_countries 编辑后保持字符串列表（F05回归）', () {
-    final v = serializeFieldValue('route_countries', '中国、俄罗斯、德国') as List;
-    expect(v, ['中国', '俄罗斯', '德国']);
-    final v2 = serializeFieldValue('route_countries', '中国,德国');
-    expect(v2, ['中国', '德国']);
-    expect(serializeFieldValue('route_countries', '  '), isNull);
-  });
-
-  test('数值字段编辑后保持num类型，非法输入保留原文', () {
-    expect(serializeFieldValue('total_packages', '480'), 480);
-    expect(serializeFieldValue('gross_weight_kg', '12300.5'), 12300.5);
-    expect(serializeFieldValue('gross_weight_kg', '12300kg'), '12300kg');
-    expect(serializeFieldValue('goods_description', ' 陶瓷卫浴洁具 '), '陶瓷卫浴洁具');
-    expect(serializeFieldValue('goods_description', ''), isNull);
-  });
-
-  test('列表字段显示为顿号连接，空值为空串', () {
-    expect(displayFieldValue(['中国', '德国']), '中国、德国');
-    expect(displayFieldValue(480), '480');
-    expect(displayFieldValue(null), '');
-  });
-
-  test('契约字段表：更换单证类型后出现目标类型字段（F05回归）', () {
-    expect(docTypeRequiredFields['unknown'], isEmpty);
-    expect(docTypeRequiredFields['railway_waybill']!.contains('route_countries'), isTrue);
-    expect(docTypeRequiredFields['export_customs_declaration']!.contains('declared_value'), isTrue);
+    test('413/422类契约错误不可重试（重试也不会成功）', () {
+      expect(isRetryable(ApiException('HTTP 413: 照片过大')), isFalse);
+    });
   });
 }

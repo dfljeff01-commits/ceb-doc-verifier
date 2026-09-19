@@ -843,9 +843,10 @@ st.info(SCENE_SENTENCE, icon="🎯")
 # ---------------- 第一步：选择单证来源（P0 卡片式入口） ----------------
 SOURCE_SAMPLE = "📁 示例批次（3组预置模拟数据，一键加载，推荐先看）"
 SOURCE_UPLOAD = "📎 上传PDF单证（向导式：声明构成→上传拆分→逐份确认→核验）"
+SOURCE_MOBILE = "📱 手机拍摄批次（输入App批次编号，查看现场上传的完整报告）"
 source_mode = st.radio(
     "第一步 · 选择单证来源",
-    [SOURCE_SAMPLE, SOURCE_UPLOAD],
+    [SOURCE_SAMPLE, SOURCE_UPLOAD, SOURCE_MOBILE],
     index=0,
     key="source_mode",
     label_visibility="collapsed",
@@ -853,8 +854,9 @@ source_mode = st.radio(
 )
 
 _mode_upload = source_mode.startswith("📎")
+_mode_mobile = source_mode.startswith("📱")
 batch = None
-if not _mode_upload:
+if not (_mode_upload or _mode_mobile):
     labels = [label for _, label in BATCH_FILES]
     batch_ids = [fn.removesuffix(".json") for fn, _ in BATCH_FILES]
     # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与培训
@@ -884,6 +886,49 @@ if not _mode_upload:
         for k, v in st.session_state.items())
     render_step_indicator(2, 3 if not _materials_used else 4)
 
+# ---------------- 手机拍摄批次模式（现场触手定位：App只传照片，完整报告回电脑端看） ----------------
+
+_mobile_record = None
+if _mode_mobile:
+    if not api_healthy():
+        st.warning("手机批次的完整报告保存在核验API服务的 mobile_results/ 目录，"
+                   "请先启动后端：`uvicorn api:app --host 0.0.0.0 --port 8000`。")
+        st.stop()
+    _default_mobile_id = st.query_params.get("mobile_batch", "")
+    mobile_id = st.text_input(
+        "输入手机App上传后显示的批次编号（形如 MB-20260920-143001-8A3C）",
+        value=_default_mobile_id, key="mobile_batch_id", placeholder="MB-…").strip()
+    if not mobile_id:
+        st.info("现场用手机App拍照上传后，App只返回一句话摘要；在此输入批次编号即可查看"
+                "该批次的完整核验报告（明细、分数构成、AI建议都在电脑端看）。")
+        st.stop()
+    try:
+        _resp = requests.get(f"{API_URL}/mobile/batch/{mobile_id}",
+                             params={"include_full": "true"}, timeout=5)
+        if _resp.status_code == 404:
+            st.error(f"未找到批次 {mobile_id} 的核验记录——请核对编号，并确认App连接的是"
+                     f"同一台后端（当前 {API_URL}）。")
+            st.stop()
+        _resp.raise_for_status()
+        _mobile_record = _resp.json()
+    except Exception as e:
+        st.error(f"查询批次失败：{e}")
+        st.stop()
+    if not _mobile_record.get("verification"):
+        st.error("该批次记录缺少完整核验报告（可能由旧版本App上传），无法展示。")
+        st.stop()
+    _verif = _mobile_record["verification"]
+    batch = {
+        "batch_id": _mobile_record.get("batch_id", mobile_id),
+        "batch_name": _verif.get("batch_name") or f"App现场拍摄 {mobile_id}",
+        "destination_summary": "（手机App现场拍摄上传）",
+        "documents": _mobile_record.get("documents", []),
+    }
+    st.success(f"已加载手机批次 {_mobile_record.get('batch_id')} —— "
+               f"拍摄于 {_mobile_record.get('created_at', '—')}，"
+               f"风险等级：{_mobile_record.get('risk_label', '—')}（{_mobile_record.get('risk_level', '—')}）")
+    st.caption("App上的一句话结论：" + _mobile_record.get("one_line", "—"))
+
 # ---------------- PDF 上传模式辅助 ----------------
 
 
@@ -911,16 +956,19 @@ with st.sidebar:
         "① 声明单据构成　→　② 逐类型上传（多单据PDF自动拆分）　→　"
         "③ 逐份核对确认　→　④ 核验查看分层结果\n\n"
         "**示例模式**\n\n"
-        "选择批次 → 核对字段 → 查看报告 → 生成整改材料")
+        "选择批次 → 核对字段 → 查看报告 → 生成整改材料\n\n"
+        "**手机批次模式**\n\n"
+        "现场App拍照上传 → 记下批次编号 → 在此输入查看完整报告")
     st.divider()
     st.header("🔗 功能入口")
     st.markdown(
         f"- [核验API文档（Swagger）]({API_URL}/docs)\n"
         f"- [API健康检查]({API_URL}/health)")
-    st.caption("📱 Android App 见项目 mobile_app/INSTALL.md（扫码分发：python serve_apk.py）；"
-               "网页端建议 PC 浏览。")
+    st.caption("📱 Android App：现场拍照即传+速查（电脑端是大脑、手机端是触手），"
+               "完整处理与深度分析在本网页完成。见 mobile_app/INSTALL.md"
+               "（扫码分发：python serve_apk.py）；网页端建议 PC 浏览。")
     st.divider()
-    st.caption("初级版 v1.4 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同")
+    st.caption("初级版 v1.5 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同")
 
 # ---------------- 向导式上传模式（任务书问题二：声明→上传拆分→逐份确认→核验） ----------------
 
@@ -937,7 +985,7 @@ if _mode_upload:
     wizard_batch, edited_documents, edited_count = result
     batch = wizard_batch
 
-if not _mode_upload:
+if not (_mode_upload or _mode_mobile):
     st.subheader("2️⃣ 单证字段（提取结果，可手动修改实时复核）")
     # 示例模式：整批编辑（向导模式的逐份编辑已在第3步完成并快照）
     edited_documents, edited_count = collect_edited_documents(batch)
@@ -951,13 +999,24 @@ if not _mode_upload:
                         f"✍️ 已手动修改 {edited_count} 个字段，以下核验结果已实时更新</span>",
                         unsafe_allow_html=True)
 
+elif _mode_mobile:
+    # 手机批次：报告已在拍摄时核验完成，这里只读展示（完整明细见下方核验结果区），
+    # 不提供字段编辑——现场纠正应回单证来源处重拍/重传，保持结果可追溯。
+    edited_documents = batch["documents"]
+    edited_count = 0
+
 # 核验（规则全部来自 verification_engine，本文件只做展示；优先走API，不可用时直连）
-effective_batch = {**batch, "documents": edited_documents}
-with st.spinner("核验计算中…"):
-    verification, verify_mode = run_verification_effective(effective_batch)
+if _mode_mobile:
+    # 手机批次直接使用拍摄时服务端核验并持久化的报告（与App一句话摘要同源同口径）
+    verification, verify_mode = _mobile_record["verification"], "api-store"
+else:
+    effective_batch = {**batch, "documents": edited_documents}
+    with st.spinner("核验计算中…"):
+        verification, verify_mode = run_verification_effective(effective_batch)
 summary = verification["summary"]
 st.caption("🔌 核验通道：" + (
     f"FastAPI 服务（{API_URL}）—— 前后端分离形态" if verify_mode == "api"
+    else "手机批次（读取API服务端持久化的完整核验报告）" if verify_mode == "api-store"
     else "进程内直连（未检测到核验API服务，启动 `uvicorn api:app --port 8000` 可切换为API形态"))
 
 # 核验结果汇总（P0：环形风险仪表为全页视觉焦点；导出按钮放标题行右侧）

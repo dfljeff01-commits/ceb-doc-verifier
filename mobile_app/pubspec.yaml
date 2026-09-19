@@ -1,5 +1,5 @@
 name: ceb_verifier
-description: 中欧班列单证智能核验 Android 演示版（拍照/相册识别 → 字段纠正 → 风险核验）
+description: 中欧班列单证核验 Android 现场版（拍照即传 → 一句话反馈 → 现场速查；完整处理在电脑端）
 publish_to: "none"
 version: 1.0.0+1
 
@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   http: ^1.2.0
   image_picker: ^1.1.0
+  path_provider: ^2.1.6
   shared_preferences: ^2.3.0
 
 dev_dependencies:

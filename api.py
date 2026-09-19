@@ -9,6 +9,15 @@
   POST /ingest/pdf     PDF摄取：按页判型 → 文本直取/OCR → 字段解析（整份一份单据）
   POST /ingest/pdf/split  多单据PDF拆分摄取：识别单据边界，逐份返回（任务书问题一）
 
+App专用端点（产品定位"电脑端是大脑、手机端是触手"）：
+  POST /mobile/quick-check  现场拍照即传：OCR → 核验 → 持久化完整报告，
+                            只返回轻量摘要（风险等级红黄绿 + 一句话关键问题 + 批次编号），
+                            不返回核验明细/分数构成/AI建议（这些留给电脑端）。
+  GET  /mobile/batch/{id}   按批次编号取历史结果（默认轻量视图；include_full=true
+                            附完整核验报告与原始单证，供电脑端网页复查展示）。
+  GET  /mobile/lookup        现场速查：按运单号/单证编号/箱号/批次编号检索
+                            历史核验结论（轻量视图，按时间倒序）。
+
 请求契约（修复 F08）：
   /verify 使用 Pydantic 模型严格校验请求体——结构错误（缺字段、类型错、null、
   fields 非对象）由框架层直接返回 422 与可读的"哪个字段什么问题"，不再 500；
@@ -29,10 +38,11 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
 import doc_contract
+import mobile_store
 import pdf_ingest
 from verification_engine import run_verification
 
-API_VERSION = "1.4.0"
+API_VERSION = "1.5.0"
 
 app = FastAPI(
     title="中欧班列单证智能核验 API",
@@ -244,3 +254,118 @@ async def ingest_pdf_split(file: UploadFile = File(...)):
             for g in r.groups
         ],
     }
+
+
+# ---------------------------------------------------------------- App专用端点（现场触手）
+
+MAX_QUICK_CHECK_PHOTOS = 5   # 现场一次拍摄整套单证（发票/箱单/运单/报关单/产地证）上限
+
+
+def _mobile_lite_payload(record: dict) -> dict:
+    """App轻量摘要响应：批次编号 + 风险等级红黄绿 + 一句话关键问题。"""
+    return {
+        "batch_id": record["batch_id"],
+        "created_at": record["created_at"],
+        **record["lite"],
+        "identity_numbers": record["identity_numbers"],
+        "detail_hint": f"请在电脑端核验网页输入批次编号 {record['batch_id']} 查看完整报告",
+    }
+
+
+@app.post("/mobile/quick-check")
+async def mobile_quick_check(
+        files: list[UploadFile] = File(..., description="现场拍摄的单证照片（1~5张）")):
+    """
+    现场拍照即传（App专用）：上传1~5张单证照片，后端OCR识别 → 组装批次 →
+    完整核验（与电脑端同一引擎）→ 持久化完整报告 → 只返回轻量摘要。
+
+    响应只含：批次编号、风险等级（green/yellow/red 与 grade/grade_label/risk_score）、
+    一句话关键问题（one_line）、单证类型清单与编号索引，不含核验明细、分数构成、
+    AI建议——完整报告请在电脑端网页输入批次编号查看。
+
+    超过照片数量/大小限制返回 413/422；OCR环境缺失返回 503；单张处理超时 504。
+    """
+    if not files:
+        raise HTTPException(status_code=422, detail="请至少上传1张照片")
+    if len(files) > MAX_QUICK_CHECK_PHOTOS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"一次最多上传{MAX_QUICK_CHECK_PHOTOS}张照片（收到{len(files)}张），"
+                   f"整套单证建议分两批拍摄")
+    payloads = []
+    for f in files:
+        data = await f.read()
+        if not data:
+            raise HTTPException(status_code=422, detail=f"照片为空：{f.filename}")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"照片超过大小限制（{f.filename}，"
+                       f"{len(data) // 1024 // 1024}MB > {MAX_IMAGE_BYTES // 1024 // 1024}MB）")
+        payloads.append((data, f.filename or "photo.jpg"))
+
+    batch_id = mobile_store.new_batch_id()
+    results = []
+    for data, name in payloads:
+        results.append(await _run_ingest(pdf_ingest.process_image, data, name))
+    if any(r.error for r in results) and not pdf_ingest.ocr_available():
+        raise HTTPException(status_code=503, detail=next(r.error for r in results if r.error))
+
+    # 单张识别异常的以unknown占位进入核验，让引擎显式告警（用户仍能得到一句话反馈，
+    # 不至于白跑一趟）；识别正常的照片 doc_id 按批次编号+序号，可回溯到具体照片。
+    documents = []
+    for i, r in enumerate(results, start=1):
+        if r.error:
+            documents.append({
+                "doc_type": "unknown", "doc_id": f"{batch_id}-{i}",
+                "title": f"未识别照片 {r.filename}", "fields": {},
+            })
+        else:
+            doc = r.to_document()
+            doc["doc_id"] = f"{batch_id}-{i}"
+            documents.append(doc)
+
+    verification = run_verification({
+        "batch_id": batch_id,
+        "batch_name": f"App现场拍摄 {batch_id}",
+        "documents": documents,
+    })
+    record = mobile_store.save_batch(documents, verification)
+    return _mobile_lite_payload(record)
+
+
+@app.get("/mobile/batch/{batch_id}")
+def mobile_get_batch(batch_id: str, include_full: bool = False):
+    """
+    按批次编号查询历史结果。
+    默认返回轻量视图（App现场速查口径：风险等级+一句话结论+编号索引）；
+    include_full=true 时附带完整核验报告（verification）与原始单证（documents），
+    供电脑端网页"输入批次编号查看完整报告"使用。
+    """
+    record = mobile_store.get_batch(batch_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"未找到批次 {batch_id} 的核验记录")
+    payload = mobile_store.lite_view(record)
+    if include_full:
+        payload["documents"] = record.get("documents", [])
+        payload["verification"] = record.get("verification", {})
+    return payload
+
+
+@app.get("/mobile/lookup")
+def mobile_lookup(q: str, limit: int = 5):
+    """
+    现场速查（App专用）：按运单号/单证编号/箱号/批次编号检索历史核验结论。
+    返回轻量视图列表（时间倒序，最多limit条），查无记录时 matches 为空列表。
+    """
+    if not q or not q.strip():
+        raise HTTPException(status_code=422, detail="查询条件不能为空（运单号/单证编号/批次编号）")
+    matches = mobile_store.lookup(q.strip(), limit=min(max(limit, 1), 20))
+    return {"query": q.strip(), "count": len(matches), "matches": matches}
+
+
+@app.get("/mobile/recent")
+def mobile_recent(limit: int = 20):
+    """最近上传批次一览（轻量视图，供运维/演示检查持久化结果）。"""
+    return {"matches": mobile_store.recent(limit=min(max(limit, 1), 50))}
+

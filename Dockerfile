@@ -28,7 +28,8 @@ RUN pip install -r requirements.txt
 # 应用代码（doc_contract.py 为数据契约层，被引擎/摄取/API/网页共同引用）
 COPY verification_engine.py risk_model.py semantic.py doc_contract.py llm_layer.py \
      llm_presets.json pdf_ingest.py api.py app.py selftest.py evaluation.py start.sh \
-     chat_assistant.py email_generator.py knowledge_base.py llm_endpoint.py ./
+     chat_assistant.py email_generator.py knowledge_base.py llm_endpoint.py \
+     mobile_store.py doc_rules.py doc_rules.yaml upload_wizard.py ./
 COPY sample_data/ sample_data/
 COPY sample_pdfs/ sample_pdfs/
 COPY evaluation_set/ evaluation_set/

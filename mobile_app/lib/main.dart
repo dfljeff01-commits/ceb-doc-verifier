@@ -1,142 +1,390 @@
-// 中欧班列单证智能核验 · Android 初级版（Flutter）
+// 中欧班列单证核验 · Android 现场版（Flutter）
 //
-// 功能流（P0）：拍照/相册选图 → 上传后端OCR识别 → 字段预览与人工纠正
-//              → 提交核验 → 风险大卡片 + 明细 + AI修正建议
-// 后端：复用 FastAPI（POST /ingest/image 与 POST /verify），App只做交互与网络调用。
-// 诚实性：识别为后端OCR真实结果，字段可人工纠正；建议以后端返回为准。
+// 产品定位：**电脑端是大脑，手机端是触手。**
+//   大脑（电脑端网页）：完整核验明细、风险分数构成、AI对话、邮件生成、报告导出；
+//   触手（本App）只做两件事——
+//     ① 拍照即传：现场（换装站/仓库/口岸）把单证"喂"给系统，得到一句话反馈；
+//     ② 现场速查：随手查一批货之前是否核验过、上次的风险等级和核心结论。
+// 核心操作路径三步以内：打开App → 拍照 → 看到一句话反馈。
+//
+// 与旧版（缩小版PC）的差异：
+//   - 移除逐字段识别结果编辑（后端 /ingest/image、/verify 能力保留，App不再调用）；
+//   - 移除完整核验明细/分数构成/AI建议展示（电脑端输入批次编号查看完整报告）；
+//   - 新增拍照前本地质量检查（模糊/过暗/边框遮挡/分辨率，不合格不上传）；
+//   - 新增弱网应对：上传失败照片本地暂存，网络恢复后自动重试，不丢照片。
+//
+// 后端：POST /mobile/quick-check（轻量摘要）、GET /mobile/lookup（现场速查），
+//       电脑端完整报告由服务端持久化（GET /mobile/batch/{id}?include_full=true）。
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const CebApp());
 
 // ---------------------------------------------------------------- 模型
 
-class DocEntry {
-  DocEntry({
-    required this.fileName,
-    required this.docType,
-    required this.fields,
-    required this.confidence,
-    this.error,
-    this.ingestSeconds = 0,
+/// 上传后的一句话反馈（App唯一的结果展示形态，绝无完整明细）。
+class QuickCheckResult {
+  QuickCheckResult({
+    required this.batchId,
+    required this.riskLevel,
+    required this.riskGrade,
+    required this.riskLabel,
+    required this.riskScore,
+    required this.oneLine,
+    required this.docCount,
+    required this.createdAt,
+    required this.detailHint,
   });
 
-  String fileName;
-  String docType;
-  Map<String, dynamic> fields;
-  Map<String, String> confidence;
-  String? error;
-  double ingestSeconds;
+  final String batchId;
+  final String riskLevel; // green / yellow / red
+  final String riskGrade; // low / medium / high
+  final String riskLabel; // 低风险/中风险/高风险
+  final int riskScore;
+  final String oneLine;
+  final int docCount;
+  final String createdAt;
+  final String detailHint;
 
-  bool get needsReview => confidence.values.contains('missing');
+  factory QuickCheckResult.fromJson(Map<String, dynamic> j) => QuickCheckResult(
+        batchId: '${j['batch_id'] ?? ''}',
+        riskLevel: '${j['risk_level'] ?? 'green'}',
+        riskGrade: '${j['risk_grade'] ?? 'low'}',
+        riskLabel: '${j['risk_label'] ?? ''}',
+        riskScore: (j['risk_score'] as num?)?.toInt() ?? 0,
+        oneLine: '${j['one_line'] ?? ''}',
+        docCount: (j['doc_count'] as num?)?.toInt() ?? 0,
+        createdAt: '${j['created_at'] ?? ''}',
+        detailHint: '${j['detail_hint'] ?? ''}',
+      );
 
-  Map<String, dynamic> toDocument() => {
-        'doc_type': docType,
-        'doc_id': 'APP-$fileName',
-        'title': typeTitles[docType] ?? '上传单证 $fileName',
-        'fields': fields,
+  Map<String, dynamic> toJson() => {
+        'batch_id': batchId,
+        'risk_level': riskLevel,
+        'risk_grade': riskGrade,
+        'risk_label': riskLabel,
+        'risk_score': riskScore,
+        'one_line': oneLine,
+        'doc_count': docCount,
+        'created_at': createdAt,
+        'detail_hint': detailHint,
+      };
+
+  Color get bannerColor => switch (riskLevel) {
+        'red' => const Color(0xFFB71C1C),
+        'yellow' => const Color(0xFF8D6E00),
+        _ => const Color(0xFF1B5E20),
+      };
+
+  Color get bannerBg => switch (riskLevel) {
+        'red' => const Color(0xFFFFEBEE),
+        'yellow' => const Color(0xFFFFF8E1),
+        _ => const Color(0xFFE8F5E9),
+      };
+
+  IconData get icon => switch (riskLevel) {
+        'red' => Icons.report,
+        'yellow' => Icons.warning_amber_rounded,
+        _ => Icons.verified_rounded,
       };
 }
 
-const typeTitles = {
-  'invoice': '商业发票 Commercial Invoice',
-  'packing_list': '装箱单 Packing List',
-  'railway_waybill': '国际铁路运单 Railway Consignment Note',
-  'export_customs_declaration': '出口报关单 Export Customs Declaration',
-  'certificate_of_origin': '原产地证书 Certificate of Origin',
-  'unknown': '未识别单证',
-};
+/// 现场速查的一条历史结论（轻量视图，与服务端 /mobile/lookup 契约对应）。
+class LookupMatch {
+  LookupMatch({
+    required this.batchId,
+    required this.createdAt,
+    required this.riskLevel,
+    required this.riskLabel,
+    required this.oneLine,
+    required this.docCount,
+  });
 
-const fieldTypeNames = {
-  'invoice': '商业发票',
-  'packing_list': '装箱单',
-  'railway_waybill': '铁路运单',
-  'export_customs_declaration': '出口报关单',
-  'certificate_of_origin': '原产地证书',
-  'unknown': '无法识别（请人工选择）',
-};
+  final String batchId;
+  final String createdAt;
+  final String riskLevel;
+  final String riskLabel;
+  final String oneLine;
+  final int docCount;
 
-// 各单证类型的契约字段（与后端 doc_contract.REQUIRED_FIELDS 同口径）。
-// 编辑页按「已提取字段 ∪ 所选类型的契约字段」渲染——更换单证类型后
-// 目标类型的字段立即出现，缺失字段可人工补齐（修复审查 F05）。
-const Map<String, List<String>> docTypeRequiredFields = {
-  'invoice': [
-    'invoice_no', 'consignor_name', 'consignee_name', 'goods_description',
-    'total_packages', 'gross_weight_kg', 'total_amount', 'currency',
-  ],
-  'packing_list': [
-    'packing_list_no', 'consignor_name', 'consignee_name', 'goods_description',
-    'total_packages', 'gross_weight_kg', 'container_no',
-  ],
-  'railway_waybill': [
-    'waybill_no', 'waybill_type', 'consignor_name', 'consignee_name',
-    'route_countries', 'goods_description', 'total_packages',
-    'gross_weight_kg', 'container_no',
-  ],
-  'export_customs_declaration': [
-    'declaration_no', 'consignor_name', 'consignee_name', 'goods_description',
-    'total_packages', 'gross_weight_kg', 'declared_value', 'currency',
-    'waybill_no', 'container_no', 'departure_country', 'destination_country',
-  ],
-  'certificate_of_origin': [
-    'co_no', 'consignor_name', 'consignee_name', 'goods_description',
-    'total_packages',
-  ],
-  'unknown': [],
-};
+  factory LookupMatch.fromJson(Map<String, dynamic> j) => LookupMatch(
+        batchId: '${j['batch_id'] ?? ''}',
+        createdAt: '${j['created_at'] ?? ''}',
+        riskLevel: '${j['risk_level'] ?? 'green'}',
+        riskLabel: '${j['risk_label'] ?? ''}',
+        oneLine: '${j['one_line'] ?? ''}',
+        docCount: (j['doc_count'] as num?)?.toInt() ?? 0,
+      );
 
-const numericFieldNames = {
-  'total_packages', 'gross_weight_kg', 'net_weight_kg', 'total_amount',
-  'declared_value',
-};
-
-const listFieldNames = {'route_countries'};
-
-/// 编辑框文本 → 字段真实类型（保存时调用）。
-/// route_countries 保持字符串列表（修复"列表被编辑成字符串"缺陷）；
-/// 数值字段解析为 num；其余为字符串；空值返回 null（删除该字段）。
-dynamic serializeFieldValue(String key, String raw) {
-  final text = raw.trim();
-  if (text.isEmpty) return null;
-  if (listFieldNames.contains(key)) {
-    final parts = text
-        .split(RegExp(r'[、，,]|->|→'))
-        .map((p) => p.trim())
-        .where((p) => p.isNotEmpty)
-        .toList();
-    return parts.isEmpty ? null : parts;
-  }
-  if (numericFieldNames.contains(key)) {
-    return num.tryParse(text) ?? text; // 解析失败保留原文，由后端口径判待复核
-  }
-  return text;
+  Color get dotColor => switch (riskLevel) {
+        'red' => const Color(0xFFB71C1C),
+        'yellow' => const Color(0xFF8D6E00),
+        _ => const Color(0xFF1B5E20),
+      };
 }
 
-/// 字段值 → 编辑框显示文本（列表用顿号连接，其余 toString）。
-String displayFieldValue(dynamic v) {
-  if (v == null) return '';
-  if (v is List) return v.join('、');
-  return '$v';
+// ---------------------------------------------------------------- 照片质量检查
+//
+// 拍完先在本机做最基础的质量把关：模糊/过暗/边框遮挡/分辨率过低的照片
+// 立即提示"请重新拍摄"，不上传——避免把明显不合格的照片传到后端浪费一轮OCR。
+// 实现为纯Dart数学（缩小到256px网格上算亮度统计），零第三方依赖。
+class PhotoQuality {
+  PhotoQuality._(this.issues);
+
+  final List<String> issues; // 人话原因列表，空=合格
+
+  bool get ok => issues.isEmpty;
+
+  /// 阈值说明：按256px缩略网格的经验值，宁可放过不可错杀（现场环境复杂）。
+  static const int gridWidth = 256;
+  static const double _meanLumaDark = 55; // 平均亮度过低 → 过暗
+  static const double _lapVarBlur = 18; // 拉普拉斯方差过低 → 模糊
+  static const double _edgeBlockRatio = 0.30; // 边缘暗块占比过高 → 遮挡/边框不完整
+  static const double _edgeLumaDark = 18; // 判定"暗块"的亮度
+  static const int minSide = 480; // 原图最短边
+
+  /// 入口：原始图片字节 → 质量结论（解码失败视为"无法读取，请重新拍摄"）。
+  static Future<PhotoQuality> assessBytes(List<int> bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(
+          Uint8List.fromList(bytes),
+          targetWidth: gridWidth);
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      final data =
+          await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      final report =
+          assessRgba(data!.buffer.asUint8List(), image.width, image.height);
+      image.dispose();
+      codec.dispose();
+      return report;
+    } catch (_) {
+      return PhotoQuality._(['照片无法读取，请重新拍摄']);
+    }
+  }
+
+  /// RGBA字节 → 亮度网格 → 四项检查（测试直接喂合成网格，不依赖真实图片）。
+  static PhotoQuality assessRgba(List<int> rgba, int width, int height) {
+    // 缩略网格：等比缩到高≤gridWidth（宽随比例），逐像素取亮度
+    final scale = gridWidth / height;
+    final w = width >= height ? math.max(1, (width * scale).round()) : gridWidth;
+    final h = height >= width ? gridWidth : math.max(1, (height * scale).round());
+    final grid = List.generate(h, (y) {
+      final sy = (y * height / h).floor().clamp(0, height - 1);
+      return List.generate(w, (x) {
+        final sx = (x * width / w).floor().clamp(0, width - 1);
+        final i = (sy * width + sx) * 4;
+        return (rgba[i] * 299 + rgba[i + 1] * 587 + rgba[i + 2] * 114) ~/ 1000;
+      });
+    });
+    return assessGrid(grid, rawWidth: width, rawHeight: height);
+  }
+
+  /// 纯函数：亮度网格上的四项基础检查。
+  static PhotoQuality assessGrid(List<List<int>> grid,
+      {int rawWidth = 0, int rawHeight = 0}) {
+    final issues = <String>[];
+    if (rawWidth > 0 && rawHeight > 0 &&
+        math.min(rawWidth, rawHeight) < minSide) {
+      issues.add('分辨率过低（最短边不足$minSide像素）');
+    }
+    final h = grid.length, w = grid.isEmpty ? 0 : grid[0].length;
+    if (h < 8 || w < 8) {
+      return PhotoQuality._(issues..add('照片尺寸异常，请重新拍摄'));
+    }
+    // ① 平均亮度
+    var sum = 0;
+    for (final row in grid) {
+      for (final v in row) {
+        sum += v;
+      }
+    }
+    final mean = sum / (h * w);
+    if (mean < _meanLumaDark) issues.add('光线过暗，请到明亮处或开补光灯');
+    // ② 清晰度：拉普拉斯响应方差（对焦实/字迹锐利 → 高；糊片 → 趋近0）
+    final lapVar = _laplacianVariance(grid);
+    if (lapVar < _lapVarBlur) issues.add('照片模糊，请对焦后重新拍摄');
+    // ③ 边框遮挡：外圈8%边条上近黑像素占比过高（手指挡镜头/单证拍出画幅）
+    final blocked = _edgeBlockedRatio(grid, _edgeLumaDark);
+    if (blocked > _edgeBlockRatio) issues.add('边框不完整/镜头被遮挡，请退后重拍');
+    return PhotoQuality._(issues);
+  }
+
+  static double _laplacianVariance(List<List<int>> g) {
+    final n = g.length, m = g[0].length;
+    var sum = 0.0, sumSq = 0.0;
+    var count = 0;
+    for (var y = 1; y < n - 1; y++) {
+      for (var x = 1; x < m - 1; x++) {
+        final v = (g[y - 1][x] + g[y + 1][x] + g[y][x - 1] + g[y][x + 1] -
+                4 * g[y][x])
+            .abs()
+            .toDouble();
+        sum += v;
+        sumSq += v * v;
+        count++;
+      }
+    }
+    if (count == 0) return 0;
+    final mean = sum / count;
+    return sumSq / count - mean * mean;
+  }
+
+  static double _edgeBlockedRatio(List<List<int>> g, double dark) {
+    final n = g.length, m = g[0].length;
+    final bw = math.max(1, (math.min(n, m) * 0.08).round());
+    var darkCount = 0, total = 0;
+    for (var y = 0; y < n; y++) {
+      for (var x = 0; x < m; x++) {
+        final onEdge = y < bw || y >= n - bw || x < bw || x >= m - bw;
+        if (!onEdge) continue;
+        total++;
+        if (g[y][x] < dark) darkCount++;
+      }
+    }
+    return total == 0 ? 0 : darkCount / total;
+  }
 }
 
-class VerifyReport {
-  VerifyReport.fromJson(Map<String, dynamic> j)
-      : summary = j['summary'],
-        risk = j['risk'],
-        results = List<Map<String, dynamic>>.from(j['results']),
-        suggestions = List<String>.from(j['suggestions'] ?? []);
+// ---------------------------------------------------------------- 弱网暂存队列
+//
+// 现场信号差是常态：上传失败的照片落盘暂存（原图字节+元信息），App开着时
+// 定时/回前台自动重试，不丢照片、不卡死用户——拍下一张继续干活。
 
-  final Map<String, dynamic> summary;
-  final Map<String, dynamic> risk;
-  final List<Map<String, dynamic>> results;
-  final List<String> suggestions;
+class QueuedPhoto {
+  QueuedPhoto({
+    required this.id,
+    required this.fileName,
+    required this.createdAt,
+    this.attempts = 0,
+    this.lastError,
+  });
+
+  final String id;
+  final String fileName;
+  final String createdAt;
+  int attempts;
+  String? lastError;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'file_name': fileName,
+        'created_at': createdAt,
+        'attempts': attempts,
+        'last_error': lastError,
+      };
+
+  static QueuedPhoto fromJson(Map<String, dynamic> j) => QueuedPhoto(
+        id: '${j['id']}',
+        fileName: '${j['file_name'] ?? ''}',
+        createdAt: '${j['created_at'] ?? ''}',
+        attempts: (j['attempts'] as num?)?.toInt() ?? 0,
+        lastError: j['last_error'] as String?,
+      );
+}
+
+class UploadQueue {
+  /// 正常模式：字节落盘到应用文档目录（dir不可为null时启用持久化）。
+  UploadQueue(this.dir) : _mem = {};
+
+  /// 内存模式：widget测试用（测试环境是FakeAsync，真实文件IO不会完成）。
+  UploadQueue.memory() : dir = null, _mem = {};
+
+  final Directory? dir;
+  final Map<String, List<int>> _mem;
+  final List<QueuedPhoto> items = [];
+
+  File get _indexFile =>
+      File('${dir!.path}${Platform.pathSeparator}pending.json');
+
+  Future<void> load() async {
+    if (dir == null) return; // 内存模式：items本就在内存，清空会抹掉测试预置
+    items.clear();
+    if (!await _indexFile.exists()) return;
+    try {
+      final list = jsonDecode(await _indexFile.readAsString()) as List;
+      items.addAll(list.map((e) => QueuedPhoto.fromJson(e)));
+    } catch (_) {
+      // 索引损坏时不丢字节文件：按目录内残留图片重建最小索引
+      await _rebuildFromFiles();
+    }
+  }
+
+  Future<void> _rebuildFromFiles() async {
+    items.clear();
+    await for (final f in dir!.list()) {
+      if (f is File && f.path.endsWith('.jpg')) {
+        final id = f.uri.pathSegments.last.replaceAll('.jpg', '');
+        items.add(QueuedPhoto(id: id, fileName: '$id.jpg', createdAt: ''));
+      }
+    }
+    await _persist();
+  }
+
+  Future<void> enqueue(String fileName, List<int> bytes) async {
+    final id =
+        'P${DateTime.now().millisecondsSinceEpoch}_${items.length}_${math.Random().nextInt(9999)}';
+    if (dir == null) {
+      _mem[id] = bytes;
+    } else {
+      await File('${dir!.path}${Platform.pathSeparator}$id.jpg')
+          .writeAsBytes(bytes);
+    }
+    items.add(QueuedPhoto(
+        id: id,
+        fileName: fileName,
+        createdAt: DateTime.now().toIso8601String()));
+    await _persist();
+  }
+
+  /// 取出指定待传照片的字节（不移除，成功后才移除）。
+  Future<List<int>> bytesOf(QueuedPhoto item) async {
+    if (dir == null) return _mem[item.id] ?? <int>[];
+    return File('${dir!.path}${Platform.pathSeparator}${item.id}.jpg')
+        .readAsBytes();
+  }
+
+  Future<void> markFailed(QueuedPhoto item, String error) async {
+    item.attempts += 1;
+    item.lastError = error.length > 80 ? error.substring(0, 80) : error;
+    await _persist();
+  }
+
+  Future<void> remove(String id) async {
+    items.removeWhere((e) => e.id == id);
+    _mem.remove(id);
+    if (dir != null) {
+      final f = File('${dir!.path}${Platform.pathSeparator}$id.jpg');
+      if (await f.exists()) await f.delete();
+    }
+    await _persist();
+  }
+
+  bool get hasPending => items.isNotEmpty;
+
+  Future<void> _persist() async {
+    if (dir == null) return;
+    await dir!.create(recursive: true);
+    await _indexFile
+        .writeAsString(jsonEncode(items.map((e) => e.toJson()).toList()));
+  }
+}
+
+/// 默认暂存目录：应用文档目录（卸载才清理，系统不会随手回收）。
+Future<Directory> defaultQueueDir() async {
+  final base = await getApplicationDocumentsDirectory();
+  return Directory('${base.path}${Platform.pathSeparator}pending_uploads');
 }
 
 // ---------------------------------------------------------------- API 客户端
@@ -146,36 +394,43 @@ class ApiClient {
 
   final String baseUrl;
 
-  Future<Map<String, dynamic>> ingestImage(List<int> bytes, String fileName) async {
-    final uri = Uri.parse('$baseUrl/ingest/image');
-    final req = http.MultipartRequest('POST', uri)
-      ..files.add(http.MultipartFile.fromBytes('file', bytes, filename: fileName));
-    final resp = await req.send().timeout(const Duration(seconds: 60));
+  /// 拍照即传：POST /mobile/quick-check（多张照片一次提交）→ 一句话摘要。
+  Future<QuickCheckResult> quickCheck(List<QueuedPhoto> photos,
+      Future<List<int>> Function(QueuedPhoto) readBytes) async {
+    final uri = Uri.parse('$baseUrl/mobile/quick-check');
+    final req = http.MultipartRequest('POST', uri);
+    for (final p in photos) {
+      req.files.add(http.MultipartFile.fromBytes('files', await readBytes(p),
+          filename: p.fileName));
+    }
+    final resp = await req.send().timeout(const Duration(seconds: 120));
     final body = await resp.stream.bytesToString();
     if (resp.statusCode == 503) {
-      throw ApiException('后端未安装OCR环境（$fileName）：${_detail(body)}');
+      throw ApiException('后端未安装OCR环境：${_detail(body)}');
+    }
+    if (resp.statusCode == 413) {
+      throw ApiException('照片过大或一次拍摄过多：${_detail(body)}');
     }
     if (resp.statusCode != 200) {
-      throw ApiException('识别失败（HTTP ${resp.statusCode}）：${_detail(body)}');
+      throw ApiException('上传失败（HTTP ${resp.statusCode}）：${_detail(body)}');
     }
-    return jsonDecode(body) as Map<String, dynamic>;
+    return QuickCheckResult.fromJson(jsonDecode(body));
   }
 
-  Future<VerifyReport> verify(List<DocEntry> docs) async {
-    final uri = Uri.parse('$baseUrl/verify');
+  /// 现场速查：按运单号/单证编号/批次编号查历史结论。
+  Future<List<LookupMatch>> lookup(String query) async {
+    final uri = Uri.parse('$baseUrl/mobile/lookup')
+        .replace(queryParameters: {'q': query});
     final resp = await http
-        .post(uri,
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'batch_id': 'app_upload',
-              'batch_name': 'App拍照识别批次',
-              'documents': docs.map((d) => d.toDocument()).toList(),
-            }))
-        .timeout(const Duration(seconds: 30));
+        .get(uri, headers: {'Content-Type': 'application/json'})
+        .timeout(const Duration(seconds: 15));
     if (resp.statusCode != 200) {
-      throw ApiException('核验失败（HTTP ${resp.statusCode}）：${_detail(resp.body)}');
+      throw ApiException('查询失败（HTTP ${resp.statusCode}）：${_detail(resp.body)}');
     }
-    return VerifyReport.fromJson(jsonDecode(resp.body));
+    final j = jsonDecode(resp.body) as Map<String, dynamic>;
+    return (j['matches'] as List? ?? [])
+        .map((e) => LookupMatch.fromJson(e))
+        .toList();
   }
 
   static String _detail(String body) {
@@ -191,75 +446,156 @@ class ApiClient {
 class ApiException implements Exception {
   ApiException(this.message);
   final String message;
+
+  @override
+  String toString() => message;
 }
 
 String friendlyError(Object e) {
   if (e is SocketException || e is HttpException) {
-    return '无法连接后端服务：请检查设置中的API地址是否正确、'
-        '后端是否已启动（uvicorn api:app --host 0.0.0.0 --port 8000），'
-        '以及手机与后端是否在同一局域网。';
+    return '网络不可用或无法连接后端：照片已暂存，恢复后自动重传；'
+        '也可在设置中检查API地址。';
   }
   if (e is TimeoutException) {
-    return '请求超时：后端响应过慢（OCR可能正在处理），请稍后重试。';
+    return '网络缓慢，上传超时：照片已暂存，信号好转后自动重传。';
   }
-  if (e is FormatException) {
-    return 'API地址格式不正确，请检查设置（应形如 http://192.168.x.x:8000）。';
-  }
+  if (e is ApiException) return e.message;
   return e.toString();
 }
+
+/// 弱网判定：这类错误值得自动重试；其余（4xx契约错误）重试也不会成功。
+bool isRetryable(Object e) =>
+    e is SocketException || e is TimeoutException || e is HttpException;
 
 // ---------------------------------------------------------------- App
 
 class CebApp extends StatelessWidget {
-  const CebApp({super.key});
+  const CebApp({super.key, this.queueDirBuilder});
+
+  final Future<Directory> Function()? queueDirBuilder;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '中欧班列单证核验',
+      title: '中欧班列单证核验 · 现场版',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0B5394)),
         useMaterial3: true,
       ),
-      home: const HomePage(),
+      home: HomePage(queueDirBuilder: queueDirBuilder),
     );
   }
 }
 
 // ---------------------------------------------------------------- 首页
+//
+// 现场三步：打开App → 拍照 → 看到一句话反馈。
+// 首页只有三块：拍照大按钮（唯一主线）、现场速查、最近反馈（本地缓存）。
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.apiFactory, this.queueDirBuilder, this.queue});
+
+  final ApiClient Function(String baseUrl)? apiFactory;
+  final Future<Directory> Function()? queueDirBuilder;
+  final UploadQueue? queue;
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _baseUrl = 'http://192.168.5.44:8000';
-  final List<DocEntry> _docs = [];
-  bool _loading = false;
-  String? _loadingMsg;
+  UploadQueue? _queue; // 弱网暂存队列（initState加载）
+  Timer? _retryTimer;
+
+  /// 每次取用时按当前设置构造（设置页改地址后立即生效，测试可注入假客户端）。
+  ApiClient get _api => widget.apiFactory?.call(_baseUrl) ?? ApiClient(_baseUrl);
+
+  QuickCheckResult? _latest; // 最近一次一句话反馈（本地缓存，杀App也在）
+  List<QuickCheckResult> _history = []; // 最近反馈（最多20条）
+  bool _uploading = false;
+  String _statusMsg = '';
+
+  // 现场速查
+  final _lookupController = TextEditingController();
+  List<LookupMatch>? _lookupResults;
+  bool _looking = false;
+  String? _lookupError;
+
 
   @override
   void initState() {
     super.initState();
-    _loadSettings();
+    WidgetsBinding.instance.addObserver(this);
+    _bootstrap();
+    _retryTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!_uploading && (_queue?.hasPending ?? false)) _drainQueue();
+    });
   }
 
-  Future<void> _loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (mounted) {
-      setState(() => _baseUrl = prefs.getString('api_base') ?? _baseUrl);
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _retryTimer?.cancel();
+    _lookupController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 回到前台立即补一轮重传（现场信号恢复后用户最可能的动作就是切回App）
+    if (state == AppLifecycleState.resumed &&
+        !_uploading &&
+        (_queue?.hasPending ?? false)) {
+      _drainQueue();
     }
   }
 
-  Future<void> _saveBaseUrl(String url) async {
-    setState(() => _baseUrl = url);
+  Future<void> _bootstrap() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('api_base', url);
+    // 注入的队列（测试）优先；正常路径才解析应用文档目录
+    final queue = widget.queue ??
+        UploadQueue(await (widget.queueDirBuilder?.call() ?? defaultQueueDir()));
+    await queue.load();
+    // 本地缓存损坏不允许卡死拍照主线：历史读不出来就当没有
+    List<QuickCheckResult> history;
+    try {
+      history = _decodeHistory(prefs.getString('recent_results'));
+    } catch (_) {
+      history = const [];
+    }
+    if (!mounted) return;
+    setState(() {
+      _baseUrl = prefs.getString('api_base') ?? _baseUrl;
+      _queue = queue;
+      _history = history;
+      _latest = _history.isNotEmpty ? _history.first : null;
+    });
+    if (queue.hasPending) _drainQueue(); // 启动即补传上次没发出去的照片
   }
+
+  static List<QuickCheckResult> _decodeHistory(String? raw) {
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      return (jsonDecode(raw) as List)
+          .map((e) => QuickCheckResult.fromJson(e))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _remember(QuickCheckResult r) async {
+    _history = [r, ..._history.where((h) => h.batchId != r.batchId)]
+        .take(20)
+        .toList();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        'recent_results', jsonEncode(_history.map((h) => h.toJson()).toList()));
+  }
+
+  // ------------------------------------------------------------ 拍照/选图
 
   Future<void> _pick(ImageSource source) async {
     final picker = ImagePicker();
@@ -273,522 +609,500 @@ class _HomePageState extends State<HomePage> {
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('打开相机/相册失败：$e'), backgroundColor: Colors.red));
+      _toast('打开相机/相册失败：$e', error: true);
       return;
     }
-    if (files.isEmpty) return;
-    await _ingest(files);
-  }
+    if (files.isEmpty || !mounted) return;
+    setState(() => _statusMsg = '正在检查照片质量…');
 
-  Future<void> _ingest(List<XFile> files) async {
-    setState(() {
-      _loading = true;
-      _loadingMsg = '正在上传并识别（${files.length}张）…';
-    });
-    final client = ApiClient(_baseUrl);
-    final okDocs = <DocEntry>[];
-    try {
-      for (final f in files) {
-        setState(() => _loadingMsg = '识别中：${f.name}');
-        final bytes = await f.readAsBytes();
-        final j = await client.ingestImage(bytes, f.name);
-        final entry = DocEntry(
-          fileName: f.name,
-          docType: j['doc_type'] ?? 'unknown',
-          fields: Map<String, dynamic>.from(j['fields'] ?? {}),
-          confidence: Map<String, String>.from(j['field_confidence'] ?? {}),
-          ingestSeconds: (j['elapsed_seconds'] ?? 0).toDouble(),
-        );
-        if ((j['error'] as String?) != null) {
-          entry.error = j['error'] as String;
-        }
-        okDocs.add(entry);
+    // ① 本地质量把关：不合格不上传，避免浪费一轮后端OCR
+    final passed = <XFile>[];
+    final rejected = <String, String>{}; // 文件 → 原因
+    for (final f in files) {
+      final quality = await PhotoQuality.assessBytes(await f.readAsBytes());
+      if (quality.ok) {
+        passed.add(f);
+      } else {
+        rejected[f.name] = quality.issues.join('；');
       }
-    } catch (e) {
-      if (!mounted) return;
-      showDialog(
+    }
+    if (!mounted) return;
+    if (rejected.isNotEmpty) {
+      final msg = rejected.entries
+          .map((e) => '${e.key}：${e.value}')
+          .join('\n');
+      if (source == ImageSource.camera && files.length == 1) {
+        setState(() => _statusMsg = '');
+        await showDialog<void>(
           context: context,
           builder: (_) => AlertDialog(
-                title: const Text('识别失败'),
-                content: Text(friendlyError(e)),
-                actions: [
-                  TextButton(
-                      onPressed: () => Navigator.pop(context), child: const Text('知道了'))
-                ],
-              ));
+            icon: const Icon(Icons.photo_camera_back, size: 44),
+            title: const Text('请重新拍摄', style: TextStyle(fontSize: 20)),
+            content: Text(msg,
+                style: const TextStyle(fontSize: 16, height: 1.5)),
+            actions: [
+              FilledButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('知道了', style: TextStyle(fontSize: 16))),
+            ],
+          ),
+        );
+        return; // 相机单张不合格：明确不上传
+      }
+      _toast('已跳过${rejected.length}张不合格照片：\n$msg', error: true);
+    }
+    if (passed.isEmpty) {
+      setState(() => _statusMsg = '');
+      return;
+    }
+    // ② 先落盘入队（哪怕秒断网也不丢），随后立即尝试上传
+    for (final f in passed) {
+      await _queue!.enqueue(f.name, await f.readAsBytes());
+    }
+    if (mounted) setState(() => _statusMsg = '已加入上传队列（${_queue!.items.length}张待传）');
+    await _drainQueue();
+  }
+
+  // ------------------------------------------------------------ 上传队列驱动
+
+  Future<void> _drainQueue() async {
+    final queue = _queue;
+    if (queue == null || !queue.hasPending || _uploading) return;
+    setState(() {
+      _uploading = true;
+      _statusMsg = '正在上传（待传${queue.items.length}张）…';
+    });
+    try {
+      while (queue.hasPending) {
+        // 先快照再上传：上传期间用户新拍的照片不会被误当作本批移除
+        final batch = queue.items.take(5).toList();
+        try {
+          final result = await _api.quickCheck(batch, (p) => queue.bytesOf(p));
+          for (final p in batch) {
+            await queue.remove(p.id);
+          }
+          await _remember(result);
+          if (!mounted) return;
+          setState(() {
+            _latest = result;
+            _statusMsg = queue.hasPending ? '还有${queue.items.length}张待传…' : '';
+          });
+        } catch (e) {
+          await queue.markFailed(batch.first, friendlyError(e));
+          if (mounted) {
+            setState(() => _statusMsg = '');
+          }
+          if (isRetryable(e)) {
+            _toast('网络不佳：照片已暂存，恢复后自动重传');
+          } else {
+            _toast('上传失败：${friendlyError(e)}', error: true);
+          }
+          break; // 网络问题停止本次驱动，交给定时器/回前台重试
+        }
+      }
     } finally {
       if (mounted) {
-        setState(() {
-          _loading = false;
-          _docs.addAll(okDocs);
-        });
+        setState(() => _uploading = false);
       }
     }
   }
 
-  Future<void> _verify() async {
-    setState(() => _loading = true);
+  void _toast(String msg, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg, style: const TextStyle(fontSize: 15)),
+        backgroundColor: error ? Colors.red.shade700 : null,
+        duration: const Duration(seconds: 4)));
+  }
+
+  // ------------------------------------------------------------ 现场速查
+
+  Future<void> _doLookup() async {
+    final q = _lookupController.text.trim();
+    if (q.isEmpty) {
+      setState(() => _lookupError = '请输入运单号/单证编号/批次编号');
+      return;
+    }
+    setState(() {
+      _looking = true;
+      _lookupError = null;
+    });
     try {
-      final report = await ApiClient(_baseUrl).verify(_docs);
+      final matches = await _api.lookup(q);
       if (!mounted) return;
-      await Navigator.push(
-          context, MaterialPageRoute(builder: (_) => ResultPage(report: report)));
+      setState(() => _lookupResults = matches);
     } catch (e) {
       if (!mounted) return;
-      showDialog(
-          context: context,
-          builder: (_) => AlertDialog(
-                title: const Text('核验失败'),
-                content: Text(friendlyError(e)),
-                actions: [
-                  TextButton(
-                      onPressed: () => Navigator.pop(context), child: const Text('知道了'))
-                ],
-              ));
+      setState(() {
+        _lookupResults = null;
+        _lookupError = friendlyError(e);
+      });
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) setState(() => _looking = false);
     }
   }
+
+  // ------------------------------------------------------------ UI
 
   @override
   Widget build(BuildContext context) {
+    final queue = _queue;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('🚂 中欧班列单证核验'),
+        title: const Text('🚂 单证现场采集',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
         actions: [
           IconButton(
-              icon: const Icon(Icons.settings),
+              icon: const Icon(Icons.settings, size: 26),
               tooltip: '后端地址设置',
               onPressed: () async {
-                final url = await Navigator.push<String>(context,
-                    MaterialPageRoute(builder: (_) => SettingsPage(initial: _baseUrl)));
-                if (url != null && url.isNotEmpty) await _saveBaseUrl(url);
+                final url = await Navigator.push<String>(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => SettingsPage(initial: _baseUrl)));
+                if (url != null && url.isNotEmpty) {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setString('api_base', url);
+                  setState(() => _baseUrl = url);
+                }
               }),
         ],
       ),
-      body: Stack(children: [
-        ListView(padding: const EdgeInsets.all(16), children: [
-          Card(
-            color: const Color(0xFFE3F2FD),
-            child: const Padding(
-              padding: EdgeInsets.all(12),
-              child: Text(
-                '中欧班列欧洲枢纽换装平均耗时38.7小时，单证不一致是主因之一——'
-                '拍下您的发票/箱单/运单/报关单，发运前几秒完成交叉核验。',
-                style: TextStyle(fontSize: 13.5),
-              ),
-            ),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        // ---- ① 拍照即传（唯一主线，按钮要大：现场可能戴手套） ----
+        FilledButton.icon(
+          icon: const Icon(Icons.photo_camera, size: 34),
+          label: const Text('拍 照 上 传',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+          style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 22)),
+          onPressed:
+              (_uploading || queue == null) ? null : () => _pick(ImageSource.camera),
+        ),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          icon: const Icon(Icons.photo_library, size: 26),
+          label: const Text('从相册选择', style: TextStyle(fontSize: 19)),
+          style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16)),
+          onPressed:
+              (_uploading || queue == null) ? null : () => _pick(ImageSource.gallery),
+        ),
+        if (_statusMsg.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Row(children: [
+            const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            const SizedBox(width: 10),
+            Expanded(child: Text(_statusMsg, style: const TextStyle(fontSize: 14))),
+          ]),
+        ],
+        Text('后端：$_baseUrl',
+            style: const TextStyle(fontSize: 11.5, color: Colors.grey)),
+        const SizedBox(height: 12),
+
+        // ---- ② 弱网暂存提示（照片没丢，恢复后自动重传） ----
+        if (queue != null && queue.hasPending) ...[
+          _PendingBanner(
+            count: queue.items.length,
+            lastError: queue.items.last.lastError,
+            onRetry: _uploading ? null : _drainQueue,
+            onDiscard: queue.hasPending
+                ? () async {
+                    final ok = await showDialog<bool>(
+                      context: context,
+                      builder: (_) => AlertDialog(
+                        title: const Text('放弃暂存照片？'),
+                        content: Text(
+                            '将删除${queue.items.length}张尚未上传成功的照片，删除后无法恢复。',
+                            style: const TextStyle(fontSize: 16)),
+                        actions: [
+                          TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('取消')),
+                          FilledButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              child: const Text('删除')),
+                        ],
+                      ),
+                    );
+                    if (ok != true) return;
+                    for (final p in queue.items.toList()) {
+                      await queue.remove(p.id);
+                    }
+                    if (mounted) setState(() {});
+                  }
+                : null,
           ),
           const SizedBox(height: 12),
-          FilledButton.icon(
-            icon: const Icon(Icons.photo_camera, size: 22),
-            label: const Text('拍照识别单证', style: TextStyle(fontSize: 17)),
-            style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 14)),
-            onPressed: _loading ? null : () => _pick(ImageSource.camera),
-          ),
-          const SizedBox(height: 10),
-          OutlinedButton.icon(
-            icon: const Icon(Icons.photo_library, size: 22),
-            label: const Text('从相册选择（可多选）', style: TextStyle(fontSize: 17)),
-            style: OutlinedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 14)),
-            onPressed: _loading ? null : () => _pick(ImageSource.gallery),
-          ),
-          const SizedBox(height: 6),
-          Text('后端：$_baseUrl',
-              style: const TextStyle(fontSize: 11.5, color: Colors.grey)),
-          const SizedBox(height: 10),
-          if (_docs.isNotEmpty) ...[
-            Text('已识别单证（${_docs.length}份）——点击卡片可编辑字段',
-                style:
-                    const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-            const SizedBox(height: 6),
-            for (var i = 0; i < _docs.length; i++)
-              _DocCard(
-                entry: _docs[i],
-                onTap: () async {
-                  final updated = await Navigator.push<DocEntry>(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) => EditFieldsPage(entry: _clone(_docs[i]))));
-                  if (updated != null) {
-                    setState(() => _docs[i] = updated);
-                  }
-                },
-                onRemove: () => setState(() => _docs.removeAt(i)),
-              ),
-            const SizedBox(height: 14),
-            FilledButton.icon(
-              icon: const Icon(Icons.verified),
-              label: const Text('开始核验', style: TextStyle(fontSize: 17)),
-              style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  backgroundColor: Colors.red.shade700),
-              onPressed: _loading ? null : _verify,
-            ),
-            const SizedBox(height: 8),
-            TextButton(
-                onPressed: () => setState(() => _docs.clear()),
-                child: const Text('清空全部单证')),
-          ],
-        ]),
-        if (_loading)
-          Container(
-            color: Colors.black38,
-            child: Center(
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const CircularProgressIndicator(),
-                      const SizedBox(height: 12),
-                      Text(_loadingMsg ?? '处理中…'),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-      ]),
-    );
-  }
-
-  static DocEntry _clone(DocEntry e) => DocEntry(
-        fileName: e.fileName,
-        docType: e.docType,
-        fields: Map<String, dynamic>.from(e.fields),
-        confidence: Map<String, String>.from(e.confidence),
-        ingestSeconds: e.ingestSeconds,
-      );
-}
-
-// ---------------------------------------------------------------- 单证卡片
-
-class _DocCard extends StatelessWidget {
-  const _DocCard({required this.entry, required this.onTap, required this.onRemove});
-
-  final DocEntry entry;
-  final VoidCallback onTap;
-  final VoidCallback onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final missing =
-        entry.confidence.entries.where((e) => e.value == 'missing').length;
-    final color = entry.error != null
-        ? Colors.red
-        : (entry.needsReview ? Colors.orange : Colors.green);
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: ListTile(
-        leading: CircleAvatar(
-            backgroundColor: color.withValues(alpha: 0.15),
-            child: Icon(Icons.description, color: color)),
-        title: Text(
-            '${fieldTypeNames[entry.docType] ?? entry.docType} · ${entry.fileName}',
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-        subtitle: Text(
-          entry.error != null
-              ? '识别失败：${entry.error}'
-              : (missing > 0
-                  ? '⚠️ $missing 个字段提取失败/需人工核对（${entry.fields.length} 个已提取）'
-                  : '${entry.fields.length} 个字段高置信度提取 · ${entry.ingestSeconds.toStringAsFixed(1)}s'),
-          style: TextStyle(fontSize: 12, color: color),
-        ),
-        trailing:
-            IconButton(icon: const Icon(Icons.delete_outline), onPressed: onRemove),
-        onTap: onTap,
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------- 字段编辑页
-
-class EditFieldsPage extends StatefulWidget {
-  const EditFieldsPage({super.key, required this.entry});
-
-  final DocEntry entry;
-
-  @override
-  State<EditFieldsPage> createState() => _EditFieldsPageState();
-}
-
-class _EditFieldsPageState extends State<EditFieldsPage> {
-  late DocEntry _entry;
-  late String _docType;
-  final Map<String, TextEditingController> _controllers = {};
-
-  @override
-  void initState() {
-    super.initState();
-    _entry = widget.entry;
-    _docType = _entry.docType;
-  }
-
-  /// 当前应渲染的字段 = 已提取字段 ∪ 置信度字段 ∪ 所选类型契约字段。
-  Set<String> _visibleKeys() {
-    final keys = <String>{..._entry.fields.keys, ..._entry.confidence.keys};
-    keys.addAll(docTypeRequiredFields[_docType] ?? const []);
-    return keys;
-  }
-
-  @override
-  void dispose() {
-    for (final c in _controllers.values) {
-      c.dispose();
-    }
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final keys = _visibleKeys().toList()..sort();
-    return Scaffold(
-      appBar: AppBar(title: Text('编辑字段 · ${_entry.fileName}')),
-      body: ListView(padding: const EdgeInsets.all(14), children: [
-        DropdownButtonFormField<String>(
-          initialValue: _docType,
-          decoration: const InputDecoration(
-              labelText: '单证类型（自动判断，可纠正；更换后出现对应字段）',
-              border: OutlineInputBorder()),
-          items: fieldTypeNames.entries
-              .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
-              .toList(),
-          onChanged: (v) => setState(() => _docType = v ?? _docType),
-        ),
-        const SizedBox(height: 6),
-        Text('低置信度/提取失败的字段以 ⚠️ 标注，缺失字段可直接填写；'
-                '经停国家用顿号或逗号分隔（保存为列表）。',
-            style: TextStyle(fontSize: 12, color: Colors.orange.shade800)),
-        const SizedBox(height: 10),
-        for (final k in keys)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 5),
-            child: TextField(
-              controller: _controllers.putIfAbsent(k,
-                  () => TextEditingController(text: displayFieldValue(_entry.fields[k]))),
-              keyboardType: numericFieldNames.contains(k)
-                  ? const TextInputType.numberWithOptions(decimal: true)
-                  : TextInputType.text,
-              decoration: InputDecoration(
-                labelText: k,
-                border: const OutlineInputBorder(),
-                suffixIcon: (_entry.confidence[k] == 'missing' ||
-                        _entry.confidence[k] == 'review')
-                    ? const Tooltip(
-                        message: '提取失败/口径存疑，需人工核对',
-                        child: Icon(Icons.warning_amber_rounded,
-                            color: Colors.orange))
-                    : _entry.confidence[k] == 'high'
-                        ? const Tooltip(
-                            message: '高置信度自动提取',
-                            child: Icon(Icons.check_circle_outline,
-                                color: Colors.green))
-                        : const Tooltip(
-                            message: '契约字段，请人工填写',
-                            child: Icon(Icons.edit_note, color: Colors.blue)),
-              ),
-            ),
-          ),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          icon: const Icon(Icons.save),
-          label: const Text('保存并返回'),
-          onPressed: () {
-            _entry.docType = _docType;
-            final saved = <String, dynamic>{..._entry.fields};
-            for (final k in keys) {
-              final value = serializeFieldValue(k, _controllers[k]!.text);
-              if (value == null) {
-                saved.remove(k);
-              } else {
-                saved[k] = value;
-              }
-            }
-            _entry.fields = saved;
-            _entry.confidence.updateAll((k, v) =>
-                (_entry.fields[k] != null && '${_entry.fields[k]}'.isNotEmpty)
-                    ? 'high'
-                    : v);
-            Navigator.pop(context, _entry);
-          },
-        ),
-      ]),
-    );
-  }
-}
-
-// ---------------------------------------------------------------- 结果页
-
-class ResultPage extends StatelessWidget {
-  const ResultPage({super.key, required this.report});
-
-  final VerifyReport report;
-
-  static const gradeColors = {
-    'low': Color(0xFF1B5E20),
-    'medium': Color(0xFF8D6E00),
-    'high': Color(0xFFB71C1C),
-  };
-  static const statusColors = {
-    'PASS': Color(0xFF1B5E20),
-    'WARNING': Color(0xFF8D6E00),
-    'FAIL': Color(0xFFB71C1C),
-  };
-
-  @override
-  Widget build(BuildContext context) {
-    final risk = report.risk;
-    final score = (risk['score'] as num).toInt();
-    final grade = risk['grade'] as String;
-    final color = gradeColors[grade] ?? Colors.grey;
-    final breakdown = List<Map<String, dynamic>>.from(risk['breakdown'] ?? []);
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('核验结果')),
-      body: ListView(padding: const EdgeInsets.all(14), children: [
-        Card(
-          elevation: 4,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 20),
-            child: Column(children: [
-              SizedBox(
-                width: 190,
-                height: 190,
-                child: Stack(alignment: Alignment.center, children: [
-                  SizedBox(
-                    width: 190,
-                    height: 190,
-                    child: CircularProgressIndicator(
-                      value: score / 100,
-                      strokeWidth: 16,
-                      strokeCap: StrokeCap.round,
-                      backgroundColor: Colors.grey.shade200,
-                      valueColor: AlwaysStoppedAnimation(color),
-                    ),
-                  ),
-                  Column(mainAxisSize: MainAxisSize.min, children: [
-                    Text('$score',
-                        style: TextStyle(
-                            fontSize: 56,
-                            fontWeight: FontWeight.bold,
-                            color: color,
-                            height: 1.0)),
-                    const Text('单证组风险分',
-                        style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    const SizedBox(height: 2),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 3),
-                      decoration: BoxDecoration(
-                          color: color.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(12)),
-                      child: Text(risk['grade_label'] as String,
-                          style: TextStyle(
-                              color: color,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15)),
-                    ),
-                  ]),
-                ]),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '共 ${report.summary['total']} 项检查 · ✅${report.summary['pass']} '
-                '⚠️${report.summary['warning']} ⛔${report.summary['fail']}',
-                style: const TextStyle(fontSize: 14),
-              ),
-            ]),
-          ),
-        ),
-        if (breakdown.isNotEmpty) ...[
-          const Padding(
-            padding: EdgeInsets.only(top: 8, bottom: 4),
-            child: Text('分数构成（可解释分解）',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-          ),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: breakdown
-                .map((b) => Chip(
-                      label: Text('${b['reason']} +${b['points']}',
-                          style: const TextStyle(fontSize: 12)),
-                      backgroundColor: (b['status'] == 'FAIL'
-                              ? Colors.red
-                              : Colors.orange)
-                          .withValues(alpha: 0.1),
-                    ))
-                .toList(),
-          ),
         ],
-        const Padding(
-          padding: EdgeInsets.only(top: 14, bottom: 4),
-          child:
-              Text('核验明细', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+
+        // ---- ③ 一句话反馈（红/黄/绿 + 一句关键问题 + 批次编号） ----
+        if (_latest != null) ...[
+          _ResultBanner(result: _latest!),
+          const SizedBox(height: 12),
+        ],
+
+        // ---- ④ 现场速查（触手独有价值：人在现场随手查历史结论） ----
+        _LookupCard(
+          controller: _lookupController,
+          looking: _looking,
+          error: _lookupError,
+          results: _lookupResults,
+          onSubmit: _doLookup,
         ),
-        for (final r in report.results)
-          Card(
-            margin: const EdgeInsets.symmetric(vertical: 4),
-            child: Container(
-              decoration: BoxDecoration(
-                border: Border(
-                    left: BorderSide(
-                        color: statusColors[r['status']] ?? Colors.grey,
-                        width: 5)),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(children: [
-                      Text('${r['status']}  ',
-                          style: TextStyle(
-                              color: statusColors[r['status']] ?? Colors.grey,
-                              fontWeight: FontWeight.bold)),
-                      Expanded(
-                          child: Text('${r['check_name']}',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w600, fontSize: 13.5))),
-                    ]),
-                    const SizedBox(height: 4),
-                    Text('${r['detail']}',
-                        style: const TextStyle(
-                            fontSize: 12.5, color: Colors.black87)),
-                  ]),
-            ),
-          ),
-        if (report.suggestions.isNotEmpty) ...[
-          const Padding(
-            padding: EdgeInsets.only(top: 14, bottom: 4),
-            child: Text('AI 修正建议',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-          ),
-          for (final s in report.suggestions)
+        const SizedBox(height: 12),
+
+        // ---- ⑤ 最近反馈（本地缓存，无网也可回看） ----
+        if (_history.length > 1) ...[
+          Text('最近反馈（完整报告在电脑端查看）',
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          for (final h in _history.take(10).skip(1))
             Card(
-              color: const Color(0xFFFFF8E1),
-              margin: const EdgeInsets.symmetric(vertical: 4),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(s, style: const TextStyle(fontSize: 12.5)),
+              margin: const EdgeInsets.symmetric(vertical: 3),
+              child: ListTile(
+                dense: true,
+                leading: Icon(h.icon, color: h.bannerColor, size: 26),
+                title: Text(h.oneLine,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 14)),
+                subtitle: Text('${h.createdAt} · ${h.batchId}',
+                    style: const TextStyle(fontSize: 12)),
               ),
             ),
         ],
         const SizedBox(height: 10),
         const Text(
-          '本工具为初级版（内部试用）：识别为OCR结果（可人工纠正），规则为简化口径，结论供人工复核参考，不构成自动放行或法律依据。',
+          '手机端只做现场采集与速查；完整核验明细、分数构成与AI建议请在电脑端网页'
+          '输入批次编号查看。本工具为初级版（内部试用），结论供人工复核参考。',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 11, color: Colors.grey),
+          style: TextStyle(fontSize: 12, color: Colors.grey),
         ),
       ]),
     );
   }
+}
+
+// ---------------------------------------------------------------- 待传横幅
+
+class _PendingBanner extends StatelessWidget {
+  const _PendingBanner(
+      {required this.count, this.lastError, this.onRetry, this.onDiscard});
+
+  final int count;
+  final String? lastError;
+  final VoidCallback? onRetry;
+  final VoidCallback? onDiscard;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFFFFF8E1),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.cloud_off, color: Color(0xFF8D6E00), size: 26),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text('$count 张照片等待上传（网络恢复后自动重试）',
+                  style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF8D6E00))),
+            ),
+            IconButton(
+                tooltip: '立即重试',
+                icon: const Icon(Icons.refresh),
+                onPressed: onRetry),
+            IconButton(
+                tooltip: '放弃这些照片',
+                icon: const Icon(Icons.delete_outline),
+                onPressed: onDiscard),
+          ]),
+          if (lastError != null)
+            Text('上次失败原因：$lastError',
+                style: const TextStyle(fontSize: 12.5, color: Colors.brown)),
+        ]),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------- 一句话反馈横幅
+
+class _ResultBanner extends StatelessWidget {
+  const _ResultBanner({required this.result});
+
+  final QuickCheckResult result;
+
+  @override
+  Widget build(BuildContext context) {
+    final r = result;
+    return Card(
+      color: r.bannerBg,
+      elevation: 3,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(r.icon, color: r.bannerColor, size: 40),
+            const SizedBox(width: 12),
+            Text(r.riskLabel,
+                style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    color: r.bannerColor)),
+            const Spacer(),
+            Text('共${r.docCount}张',
+                style: TextStyle(fontSize: 14, color: r.bannerColor)),
+          ]),
+          const SizedBox(height: 10),
+          Text(r.oneLine,
+              style: const TextStyle(fontSize: 17, height: 1.5)),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+                color: Colors.white, borderRadius: BorderRadius.circular(8)),
+            child: Row(children: [
+              const Icon(Icons.qr_code_2, size: 22, color: Colors.black54),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SelectableText('批次编号 ${r.batchId}',
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600)),
+              ),
+              IconButton(
+                  tooltip: '复制批次编号',
+                  icon: const Icon(Icons.copy, size: 20),
+                  onPressed: () => _copy(context)),
+            ]),
+          ),
+          const SizedBox(height: 8),
+          Text('完整报告请在电脑端核验网页输入批次编号查看。',
+              style: TextStyle(fontSize: 13.5, color: Colors.grey.shade700)),
+        ]),
+      ),
+    );
+  }
+
+  void _copy(BuildContext context) {
+    // 现场把编号抄给电脑端最怕抄错：复制按钮 + 提示
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('已复制批次编号 ${result.batchId}',
+            style: const TextStyle(fontSize: 15))));
+  }
+}
+
+// ---------------------------------------------------------------- 现场速查卡片
+
+class _LookupCard extends StatelessWidget {
+  const _LookupCard({
+    required this.controller,
+    required this.looking,
+    required this.error,
+    required this.results,
+    required this.onSubmit,
+  });
+
+  final TextEditingController controller;
+  final bool looking;
+  final String? error;
+  final List<LookupMatch>? results;
+  final VoidCallback onSubmit;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Row(children: [
+            Icon(Icons.travel_explore, size: 24, color: Color(0xFF0B5394)),
+            SizedBox(width: 8),
+            Text('现场速查',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+          ]),
+          const SizedBox(height: 4),
+          const Text('输入运单号/单证编号，查这批货之前是否核验过、上次结论是什么',
+              style: TextStyle(fontSize: 13, color: Colors.grey)),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: controller,
+                textInputAction: TextInputAction.search,
+                onSubmitted: (_) => onSubmit(),
+                style: const TextStyle(fontSize: 17),
+                decoration: const InputDecoration(
+                  hintText: '如 SMU/T/2026-09',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            FilledButton(
+              onPressed: looking ? null : onSubmit,
+              style: FilledButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 22, vertical: 16)),
+              child: looking
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('查询', style: TextStyle(fontSize: 17)),
+            ),
+          ]),
+          if (error != null) ...[
+            const SizedBox(height: 10),
+            Text(error!,
+                style:
+                    const TextStyle(fontSize: 14, color: Color(0xFFB71C1C))),
+          ],
+          if (results != null) ...[
+            const SizedBox(height: 10),
+            if (results!.isEmpty)
+              const Text('未查询到历史核验记录——这批货可能还没在系统里核验过，'
+                      '可现场拍照上传补一次核验。',
+                  style: TextStyle(fontSize: 14.5, height: 1.5))
+            else
+              for (final m in results!)
+                Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: ListTile(
+                    leading: Icon(_dot(m.riskLevel), color: _color(m.riskLevel), size: 32),
+                    title: Text(m.oneLine,
+                        style: const TextStyle(fontSize: 15, height: 1.4)),
+                    subtitle: Text(
+                        '${m.createdAt} · ${m.batchId} · ${m.docCount}张单证 · ${m.riskLabel}',
+                        style: const TextStyle(fontSize: 12.5)),
+                  ),
+                ),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  static Color _color(String level) => switch (level) {
+        'red' => const Color(0xFFB71C1C),
+        'yellow' => const Color(0xFF8D6E00),
+        _ => const Color(0xFF1B5E20),
+      };
+
+  static IconData _dot(String level) => switch (level) {
+        'red' => Icons.circle,
+        'yellow' => Icons.warning_amber_rounded,
+        _ => Icons.check_circle_rounded,
+      };
 }
 
 // ---------------------------------------------------------------- 设置页
@@ -827,6 +1141,7 @@ class _SettingsPageState extends State<SettingsPage> {
           TextField(
             controller: _controller,
             keyboardType: TextInputType.url,
+            style: const TextStyle(fontSize: 16),
             decoration: const InputDecoration(
               labelText: 'API Base URL',
               hintText: 'http://192.168.x.x:8000',
@@ -836,7 +1151,9 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 12),
           FilledButton(
-            child: const Text('保存'),
+            style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14)),
+            child: const Text('保存', style: TextStyle(fontSize: 17)),
             onPressed: () {
               final url = _controller.text.trim().replaceAll(RegExp(r'/+$'), '');
               if (!url.startsWith('http')) {
@@ -857,8 +1174,9 @@ class _SettingsPageState extends State<SettingsPage> {
                 '提示：后端启动命令示例\n'
                 '  uvicorn api:app --host 0.0.0.0 --port 8000\n'
                 '手机需与后端电脑连接同一Wi-Fi/局域网。\n'
-                'Android模拟器访问本机请用 http://10.0.2.2:8000',
-                style: TextStyle(fontSize: 12.5, height: 1.6),
+                'Android模拟器访问本机请用 http://10.0.2.2:8000\n\n'
+                '上传失败的照片会暂存在手机里，网络恢复且App在运行时自动重传。',
+                style: TextStyle(fontSize: 13, height: 1.6),
               ),
             ),
           ),

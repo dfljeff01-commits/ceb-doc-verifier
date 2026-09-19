@@ -86,7 +86,7 @@ cloudflared tunnel --url http://localhost:8501
 - **风险仪表盘**：大号环形风险分仪表（0-100，红/黄/绿）为全页视觉焦点，汇总卡与可解释分数构成同屏；
 - **配色统一**：红/黄/绿风险色在仪表盘、分组、明细、建议、知识库各区块使用同一组色值（GRADE_COLORS 唯一定义）；
 - **Streamlit Deploy 按钮已隐藏**（`.streamlit/config.toml` toolbarMode="viewer" + CSS 双保险），避免使用者误按平台部署入口；
-- **移动端说明**：Streamlit 窄屏下布局可纵向堆叠、无错位（390px 实测），但宽表格体验一般——**移动端请优先使用配套 Android App**，网页端建议 PC 浏览（Streamlit 框架本身的局限，未做深度适配）。
+- **移动端说明**：Streamlit 窄屏下布局可纵向堆叠、无错位（390px 实测），但宽表格体验一般——**移动端请优先使用配套 Android App**（现场拍照即传+速查；完整处理与深度分析在本网页完成），网页端建议 PC 浏览（Streamlit 框架本身的局限，未做深度适配）。
 
 ## 功能总览
 
@@ -198,17 +198,21 @@ PDF处理管线（按页路由，同一PDF可混合判型）：文本型PDF直�
 
 ### 7️⃣ Android 原生App（Flutter，侧载演示版）
 
-`mobile_app/` 为 Flutter 构建的 Android 演示 App（**侧载安装，未上架应用商店**）：
+**产品定位：电脑端是大脑，手机端是触手。** 电脑端负责完整核验、知识库、风险明细、AI对话、邮件生成、报告导出等需要专注操作与完整视野的工作；App 只做现场（换装站/仓库/口岸）的两件事——**拍照即传**与**现场速查**，核心操作路径三步以内：打开App → 拍照 → 看到一句话反馈。
 
-- **首页**：拍照识别单证 / 相册多选 → 上传后端 `/ingest/image` OCR识别（识别中加载态）；
-- **字段预览与人工纠正**：每份单证列出提取字段，低置信度/失败字段 ⚠️ 标注（与Web端同一诚实性设计语言），可编辑后保存；
-- **核验结果页**：大号圆环风险分卡片（0-100+红/黄/绿等级色）、分数构成chips、明细列表（状态色条）、AI修正建议；
-- **后端地址可配置**：设置页填局域网IP（演示现场不写死）；网络失败（后端未启动/IP错误/超时）均有明确弹窗提示，不白屏不崩溃；
-- App 本身零核验逻辑，全部复用 FastAPI `/ingest/image` 与 `/verify`（前后端分离形态）。
+`mobile_app/` 为 Flutter 构建的 Android App（**侧载安装，未上架应用商店**）：
+
+- **拍照即传（唯一主线）**：首页只有"拍照/相册选择"大按钮；拍完先在本机做基础质量把关（模糊/过暗/边框遮挡/分辨率过低），不合格立即提示"请重新拍摄"，不上传、不浪费后端一轮OCR；合格照片先落盘入队再立即上传；
+- **一句话反馈**：上传后不返回完整报告，只返回 **风险等级（红/黄/绿）+ 一句最关键的问题 + 批次编号**（`POST /mobile/quick-check` 轻量摘要契约）；完整核验明细、分数构成、AI建议都在电脑端——网页选"📱 手机拍摄批次"输入批次编号即可查看该批次完整报告；
+- **现场速查**：输入运单号/单证编号/批次编号，随手查"这批货之前是否核验过、上次的风险等级与核心结论"（`GET /mobile/lookup`，按时间倒序返回轻量结论）；
+- **弱网应对**：现场信号差不影响干活——上传失败的照片本地暂存并提示"网络恢复后自动重试"（15秒定时 + 回到前台触发自动补传），照片不丢、不卡死，可以继续拍下一张；
+- **大字大按钮**：现场光线复杂、可能戴手套操作，按钮与字号按现场作业标准设计；
+- **后端地址可配置**：设置页填局域网IP（演示现场不写死）；App 自身零核验逻辑，核验与电脑端同一引擎、同一口径（服务端 `/mobile/quick-check` 内部复用 ingest+verify 后持久化完整报告）。
+
+**明确不做（旧版"缩小版PC"功能已移除，只留电脑端）**：逐字段识别结果编辑、完整核验明细/风险分数构成展示、AI对话助手、邮件生成、单据构成声明向导。后端 `/ingest/image`、`/verify` 能力保留（电脑端与集成方继续使用），App 前端不再调用字段编辑类交互。
 
 **构建产物**（`mobile_app/build/app/outputs/flutter-apk/`）：
-- `app-release.apk` 49.0MB（通用，含全部ABI）
-- `app-arm64-v8a-release.apk` 17.2MB（现代手机推荐）、armeabi-v7a 14.7MB、x86_64 18.6MB
+- `app-release.apk`（通用，含全部ABI）及 `app-arm64-v8a-release.apk`（现代手机推荐）等分ABI版本，产物含 `.sha1` 哈希
 
 **安装与演示**：见 `mobile_app/INSTALL.md`（含未知来源开启路径、扫码下载、演示脚本）。
 演示后端需 `uvicorn api:app --host 0.0.0.0 --port 8000` 启动（含OCR需在Docker容器内或本机装tesseract）；
@@ -216,13 +220,13 @@ PDF处理管线（按页路由，同一PDF可混合判型）：文本型PDF直�
 `python serve_apk.py` 可在局域网分发APK并自动生成下载二维码（`apk_qrcode.png`）。
 
 > 构建环境说明：Flutter 3.47.4 stable + JDK17(Temurin) + Android SDK 36，经国内镜像与本机代理完成依赖拉取；
-> Dart 单测 2/2 通过（错误映射与文档结构转换）。
+> Flutter 单测 28/28 通过（质量检查数学、弱网暂存队列、轻量摘要契约、首页验收 widget 测试等）+ analyzer 零告警。
 
 ### 8️⃣ 工程化
 
-- **API化**：FastAPI `/verify` 接收批次JSON返回核验报告+风险分+**按单据分组的分层结果（document_groups/batch_level_issues）**，可选 `declared_composition` 申报构成（Swagger：`http://localhost:8000/docs`）。**请求体用 Pydantic 模型严格校验**——结构错误返回422并指明具体字段；上传端点有**文件大小（图片10MB/PDF20MB→413）、页数（>20页→413）、处理耗时（>120s→504）三重限制**，OCR等阻塞操作在受限工作线程池执行。新增 **`POST /ingest/pdf/split`** 多单据PDF拆分摄取端点（返回逐份识别结果与 needs_confirmation 边界确认标记，供移动端/集成复用）。Streamlit 优先走API（前后端分离），API未启动自动降级进程内直连并在页面标注当前通道；
+- **API化**：FastAPI `/verify` 接收批次JSON返回核验报告+风险分+**按单据分组的分层结果（document_groups/batch_level_issues）**，可选 `declared_composition` 申报构成（Swagger：`http://localhost:8000/docs`）。**请求体用 Pydantic 模型严格校验**——结构错误返回422并指明具体字段；上传端点有**文件大小（图片10MB/PDF20MB→413）、页数（>20页→413）、处理耗时（>120s→504）三重限制**，OCR等阻塞操作在受限工作线程池执行。新增 **`POST /ingest/pdf/split`** 多单据PDF拆分摄取端点（返回逐份识别结果与 needs_confirmation 边界确认标记，供移动端/集成复用）。**App专用端点**（"电脑端是大脑、手机端是触手"定位配套）：`POST /mobile/quick-check`（拍照即传，OCR→核验→持久化完整报告，只返回轻量摘要：红/黄/绿+一句话关键问题+批次编号，不含明细）、`GET /mobile/lookup`（按运单号/单证编号/批次编号现场速查历史结论）、`GET /mobile/batch/{id}`（按批次编号取记录，`include_full=true` 附完整报告供电脑端网页复查），完整记录持久化于 `mobile_results/`（一批次一JSON，原子写）。Streamlit 优先走API（前后端分离），API未启动自动降级进程内直连并在页面标注当前通道；
 - **数据版本**：邮件草稿、对话会话、PDF报告全部关联**单证内容哈希版本**（`doc_contract.data_version`）——字段编辑/换文件后旧草稿失效并提示重新生成，邮件**下载读取当前编辑后的文本**，上传缓存按**文件名+内容SHA256**判重；
-- **测试**：pytest 共 146 项（引擎+API契约 54 + 风险/语义/评估 23 + PDF摄取/拆分 19 + 多单据流程/知识库/分层结构 28 + 原生AI/数据版本 22，含 F01-F10 全部审查反例回归与五类单据缺必填字段FAIL验收）；另有 `selftest.py`（28项验收自测，纯标准库）、`_selftest/upload_e2e.py`（向导式上传端到端）、`_selftest/visual_test.py`（示例批次视觉/交互）、`_selftest/live_ai_test.py`（真实LLM实测，需Key）；
+- **测试**：pytest 共 159 项（引擎+API契约 54 + 风险/语义/评估 23 + PDF摄取/拆分 19 + 多单据流程/知识库/分层结构 28 + 原生AI/数据版本 22 + **App移动端点 13**，含 F01-F10 全部审查反例回归与五类单据缺必填字段FAIL验收）；另有 `selftest.py`（28项验收自测，纯标准库）、`_selftest/upload_e2e.py`（向导式上传端到端）、`_selftest/visual_test.py`（示例批次视觉/交互）、`_selftest/live_ai_test.py`（真实LLM实测，需Key）；
 - **版本管理**：本项目自审查整改起使用 Git 仓库管理，修复按 F0x 分组提交，commit 信息可追溯；容器构建使用多阶段缓存并内置 HEALTHCHECK；APK 重建产物含 `.sha1` 哈希文件；
 - **容器化**：单镜像同时运行 API+网页，内置 tesseract-ocr + 中文包 chi_sim + poppler-utils，`docker build` + `docker run` 即用；`start.sh` 管理 API 进程生命周期（API退出则容器退出，网页不"假活"）；
 - **依赖锁定**：requirements.txt 全部精确锁定实测版本（含上传路由所需 python-multipart、APK分发二维码所需 qrcode）。
@@ -271,7 +275,8 @@ ceb_doc_verifier/
 ├── email_generator.py         # AI整改邮件（LLM实时 + 离线模板降级）
 ├── knowledge_base.py          # 合规依据知识库 + 向量检索（RAG-lite）
 ├── llm_endpoint.py            # LLM端点解析（Ark/GLM OpenAI兼容）
-├── api.py                     # FastAPI /verify 核验服务（Pydantic请求契约+上传限制+线程池）
+├── api.py                     # FastAPI /verify 核验服务（Pydantic请求契约+上传限制+线程池）+ /mobile/* App专用端点
+├── mobile_store.py            # App批次记录持久化与现场速查索引（mobile_results/ 一批次一JSON，原子写）
 ├── start.sh                   # 容器启动脚本（API+网页，API生命周期受管）
 ├── Dockerfile                 # 含OCR系统依赖的容器镜像（HEALTHCHECK）
 ├── selftest.py                # 验收自测（28项，纯标准库）
@@ -282,9 +287,9 @@ ceb_doc_verifier/
 ├── evaluation.py              # 量化评估（冻结留出集只读 + 校准集分离 + 多指标报告）
 ├── evaluation_report.md       # 最近一次评估输出（含留出集SHA256）
 ├── test_verification_engine.py / test_risk_model.py / test_pdf_ingest.py / test_native_ai.py / test_multi_doc_flow.py
-├── mobile_app/                # Flutter Android App（侧载演示版，见 mobile_app/INSTALL.md）
-│   ├── lib/main.dart              # App全部代码（拍照/相册→识别→契约字段编辑→核验结果）
-│   ├── test/                      # Dart单测（6项）
+├── mobile_app/                # Flutter Android App（现场触手：拍照即传+现场速查，见 mobile_app/INSTALL.md）
+│   ├── lib/main.dart              # App全部代码（拍照即传→本地质量把关→一句话反馈→现场速查→弱网自动重试）
+│   ├── test/                      # Flutter单测（28项：质量检查/队列/摘要契约/首页验收）
 │   └── INSTALL.md                 # 安装说明（未知来源开启/扫码下载/演示脚本）
 ├── serve_apk.py               # 局域网APK分发 + 二维码生成
 ├── apk_qrcode.png             # APK扫码下载二维码（指向局域网地址）
