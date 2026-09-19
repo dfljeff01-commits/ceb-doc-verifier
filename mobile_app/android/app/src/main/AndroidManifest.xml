@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- 局域网明文HTTP访问后端（演示场景） -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 扫码速查：摄像头权限（mobile_scanner 扫描单证条码/二维码） -->
+    <uses-permission android:name="android.permission.CAMERA"/>
     <application
         android:label="班列单证核验"
         android:name="${applicationName}"

@@ -3,9 +3,9 @@
 // 字体加载本机真实中文字体（等线），保证截图文字为真实字形而非测试占位块。
 //
 // 重新生成：flutter test test/flow_screenshots_test.dart --update-goldens
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:ceb_verifier/main.dart';
 import 'package:flutter/material.dart';
@@ -124,7 +124,7 @@ Future<void> _seedHistory() async {
 }
 
 Future<void> main() async {
-  await TestWidgetsFlutterBinding.ensureInitialized();
+  TestWidgetsFlutterBinding.ensureInitialized();
   await _loadFonts();
   testWidgets('截图01 · 首页：拍照即传主线 + 现场速查入口', (tester) async {
     _usePhoneViewport(tester);
@@ -181,5 +181,32 @@ Future<void> main() async {
     await tester.pumpAndSettle();
     await expectLater(find.byType(MaterialApp),
         matchesGoldenFile('goldens_flow/04_field_lookup.png'));
+  });
+
+  testWidgets('截图05 · 扫码：首次使用摄像头用途说明', (tester) async {
+    _usePhoneViewport(tester);
+    await _seedHistory();
+    final scannerNeverReturns = Completer<String?>().future;
+    await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: HomePage(
+            apiFactory: (_) => ScreenshotApi(),
+            queue: UploadQueue.memory(),
+            scannerBuilder: () => scannerNeverReturns)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('扫码查询'));
+    await tester.pumpAndSettle();
+    await expectLater(find.byType(MaterialApp),
+        matchesGoldenFile('goldens_flow/05_scan_rationale.png'));
+  });
+
+  testWidgets('截图06 · 扫码：取景页（取消按钮/指引/手动输入退路）', (tester) async {
+    _usePhoneViewport(tester);
+    await tester.pumpWidget(const MaterialApp(
+        debugShowCheckedModeBanner: false, home: BarcodeScannerPage()));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    await expectLater(find.byType(MaterialApp),
+        matchesGoldenFile('goldens_flow/06_scan_page.png'));
   });
 }

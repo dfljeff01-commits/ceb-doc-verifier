@@ -26,6 +26,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -254,6 +255,152 @@ class PhotoQuality {
       }
     }
     return total == 0 ? 0 : darkCount / total;
+  }
+}
+
+// ---------------------------------------------------------------- 扫码速查
+//
+// 扫码是"现场速查"的输入方式之一（不是所有单证都印了机器可读码，手动输入保留
+// 为默认路径）。扫码识别出的文本直接复用现有 /mobile/lookup 查询逻辑，
+// 不涉及任何存储/接口改动。
+//
+// 扫码结果必须先过校验：单证编号的自然形态是"4~64个连续字符、无空格、非URL"——
+// 扫到无关二维码（网址/名片/整句文本）时给出明确提示，不拿无效内容浪费一次查询。
+
+const String scanInvalidMessage = '未识别到有效的单证编号，请重新扫描或手动输入';
+const String scanPermissionMessage = '需要摄像头权限用于扫描单证条码';
+
+String? sanitizeScannedCode(String? raw) {
+  if (raw == null) return null;
+  final code = raw.trim();
+  if (code.length < 4 || code.length > 64) return null; // 过短/异常长都不可信
+  if (RegExp(r'\s').hasMatch(code)) return null; // 整句人读文本，不是编号
+  if (RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:').hasMatch(code)) {
+    return null; // http:/tel:/BEGIN: 等协议类内容
+  }
+  return code;
+}
+
+/// 扫码页：取景框 + 明确的取消按钮 + 权限拒绝降级UI。
+/// 返回扫到的原始文本（合法与否由首页统一校验决策）；取消/异常返回 null。
+class BarcodeScannerPage extends StatefulWidget {
+  const BarcodeScannerPage({super.key});
+
+  @override
+  State<BarcodeScannerPage> createState() => _BarcodeScannerPageState();
+}
+
+class _BarcodeScannerPageState extends State<BarcodeScannerPage> {
+  bool _handled = false; // 同一个码会连续回调多次，只认第一次
+
+  void _finish(String? raw) {
+    if (_handled) return;
+    _handled = true;
+    Navigator.of(context).pop(raw);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('扫码速查'),
+        leading: IconButton(
+          icon: const Icon(Icons.close, size: 28),
+          tooltip: '取消扫码',
+          onPressed: () => _finish(null),
+        ),
+      ),
+      body: Column(children: [
+        Container(
+          width: double.infinity,
+          color: const Color(0xFFE3F2FD),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: const Row(children: [
+            Icon(Icons.info_outline, size: 20, color: Color(0xFF0B5394)),
+            SizedBox(width: 8),
+            Expanded(
+                child: Text('将单证上的条码/二维码对准取景框，识别后自动查询',
+                    style: TextStyle(fontSize: 14.5))),
+          ]),
+        ),
+        Expanded(
+          child: MobileScanner(
+            onDetect: (capture) {
+              for (final barcode in capture.barcodes) {
+                final raw = barcode.rawValue;
+                if (raw != null && raw.trim().isNotEmpty) {
+                  _finish(raw);
+                  return;
+                }
+              }
+            },
+            errorBuilder: (context, error) => ScannerErrorView(
+              error: error,
+              onManualInput: () => _finish(null),
+            ),
+            placeholderBuilder: (_) => const Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 12),
+              Text('正在启动摄像头…', style: TextStyle(fontSize: 15)),
+            ])),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.keyboard, size: 24),
+            label: const Text('改用手动输入', style: TextStyle(fontSize: 16)),
+            onPressed: () => _finish(null),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+/// 相机异常视图（公开便于测试）：权限拒绝给中文说明与降级引导；其余错误如实展示。
+class ScannerErrorView extends StatelessWidget {
+  const ScannerErrorView({super.key, required this.error, this.onManualInput});
+
+  final MobileScannerException error;
+  final VoidCallback? onManualInput;
+
+  @override
+  Widget build(BuildContext context) {
+    final denied =
+        error.errorCode == MobileScannerErrorCode.permissionDenied;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(denied ? Icons.no_photography : Icons.error_outline,
+              size: 56, color: Colors.red.shade400),
+          const SizedBox(height: 14),
+          Text(
+              denied
+                  ? scanPermissionMessage
+                  : '摄像头启动失败，无法扫码',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              textAlign: TextAlign.center),
+          const SizedBox(height: 8),
+          Text(
+              denied
+                  ? '请在系统设置→应用→班列单证核验→权限中允许相机后重试；'
+                      '也可返回后直接手动输入运单号/批次编号查询。'
+                  : '错误类型：${error.errorCode.name}。可返回后改用手动输入查询。',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 14.5, height: 1.5)),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            icon: const Icon(Icons.keyboard, size: 22),
+            label:
+                const Text('返回手动输入', style: TextStyle(fontSize: 16)),
+            onPressed: onManualInput,
+          ),
+        ]),
+      ),
+    );
   }
 }
 
@@ -494,11 +641,15 @@ class CebApp extends StatelessWidget {
 // 首页只有三块：拍照大按钮（唯一主线）、现场速查、最近反馈（本地缓存）。
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.apiFactory, this.queueDirBuilder, this.queue});
+  const HomePage(
+      {super.key, this.apiFactory, this.queueDirBuilder, this.queue, this.scannerBuilder});
 
   final ApiClient Function(String baseUrl)? apiFactory;
   final Future<Directory> Function()? queueDirBuilder;
   final UploadQueue? queue;
+
+  /// 扫码入口（可注入：测试用假扫码器代替真实摄像头页面）。
+  final Future<String?> Function()? scannerBuilder;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -742,6 +893,53 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  /// 扫码 → 查询：识别成功自动填入并立即触发查询（无需再点"查询"）；
+  /// 无关内容给明确提示且不发起请求；取消则静默返回（手动输入始终可用）。
+  Future<void> _openBarcodeScanner() async {
+    // 首次使用：先讲清楚摄像头用途，再交给系统权限弹窗
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    if (!(prefs.getBool('scan_rationale_shown') ?? false)) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          icon: const Icon(Icons.qr_code_scanner, size: 44),
+          title:
+              const Text('扫码速查', style: TextStyle(fontSize: 20)),
+          content: const Text(
+              '$scanPermissionMessage。将单证上的条码/二维码对准取景框即可自动识别'
+              '编号并查询；没有条码的单证仍可手动输入。点击"开始扫码"后系统将申请摄像头权限。',
+              style: TextStyle(fontSize: 16, height: 1.5)),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('手动输入')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('开始扫码')),
+          ],
+        ),
+      );
+      await prefs.setBool('scan_rationale_shown', true);
+      if (go != true || !mounted) return;
+    }
+    if (!mounted) return;
+    final raw = await (widget.scannerBuilder?.call() ?? _pushBarcodeScanner());
+    if (!mounted || raw == null) return; // 用户取消/权限拒绝 → 回到手动输入
+    final code = sanitizeScannedCode(raw);
+    if (code == null) {
+      // 无关二维码：明确提示，不拿无效内容浪费一次查询
+      setState(() => _lookupError = scanInvalidMessage);
+      _toast(scanInvalidMessage);
+      return;
+    }
+    _lookupController.text = code;
+    await _doLookup();
+  }
+
+  Future<String?> _pushBarcodeScanner() => Navigator.push<String>(
+      context, MaterialPageRoute(builder: (_) => const BarcodeScannerPage()));
+
   // ------------------------------------------------------------ UI
 
   @override
@@ -852,6 +1050,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           error: _lookupError,
           results: _lookupResults,
           onSubmit: _doLookup,
+          onScan: _openBarcodeScanner,
         ),
         const SizedBox(height: 12),
 
@@ -1008,6 +1207,7 @@ class _LookupCard extends StatelessWidget {
     required this.error,
     required this.results,
     required this.onSubmit,
+    required this.onScan,
   });
 
   final TextEditingController controller;
@@ -1015,6 +1215,7 @@ class _LookupCard extends StatelessWidget {
   final String? error;
   final List<LookupMatch>? results;
   final VoidCallback onSubmit;
+  final VoidCallback onScan;
 
   @override
   Widget build(BuildContext context) {
@@ -1030,7 +1231,7 @@ class _LookupCard extends StatelessWidget {
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
           ]),
           const SizedBox(height: 4),
-          const Text('输入运单号/单证编号，查这批货之前是否核验过、上次结论是什么',
+          const Text('输入或扫码查运单号/单证编号，看这批货之前是否核验过、上次结论是什么',
               style: TextStyle(fontSize: 13, color: Colors.grey)),
           const SizedBox(height: 10),
           Row(children: [
@@ -1041,18 +1242,27 @@ class _LookupCard extends StatelessWidget {
                 onSubmitted: (_) => onSubmit(),
                 style: const TextStyle(fontSize: 17),
                 decoration: const InputDecoration(
-                  hintText: '如 SMU/T/2026-09',
+                  hintText: '运单号/批次编号',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
+            // 扫码：查询输入方式的补充（单证上有条码/二维码时免手动输入）
+            IconButton.filledTonal(
+              tooltip: '扫码查询',
+              onPressed: onScan,
+              icon: const Icon(Icons.qr_code_scanner, size: 26),
+              style: IconButton.styleFrom(
+                  padding: const EdgeInsets.all(14)),
+            ),
+            const SizedBox(width: 8),
             FilledButton(
               onPressed: looking ? null : onSubmit,
               style: FilledButton.styleFrom(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 22, vertical: 16)),
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 16)),
               child: looking
                   ? const SizedBox(
                       width: 20,
@@ -1064,8 +1274,8 @@ class _LookupCard extends StatelessWidget {
           if (error != null) ...[
             const SizedBox(height: 10),
             Text(error!,
-                style:
-                    const TextStyle(fontSize: 14, color: Color(0xFFB71C1C))),
+                style: const TextStyle(
+                    fontSize: 14, color: Color(0xFFB71C1C), height: 1.4)),
           ],
           if (results != null) ...[
             const SizedBox(height: 10),

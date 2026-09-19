@@ -60,10 +60,13 @@ class FakeApi extends ApiClient {
 }
 
 Future<void> _pumpHome(WidgetTester tester,
-    {required FakeApi api, UploadQueue? queue}) async {
+    {required FakeApi api,
+    UploadQueue? queue,
+    Future<String?> Function()? scannerBuilder}) async {
   SharedPreferences.setMockInitialValues({});
   await tester.pumpWidget(MaterialApp(
-      home: HomePage(apiFactory: (_) => api, queue: queue)));
+      home: HomePage(
+          apiFactory: (_) => api, queue: queue, scannerBuilder: scannerBuilder)));
   await tester.pumpAndSettle();
   await tester.pumpAndSettle(); // 给启动补传的异步链留出完成空间
 }
@@ -130,5 +133,54 @@ void main() {
                 find.widgetWithText(FilledButton, '拍 照 上 传'))
             .onPressed,
         isNotNull);
+  });
+
+  // ---------------- 扫码速查（P1补齐：扫码作为查询输入方式之一） ----------------
+
+  /// 完整走一遍扫码入口：点扫码按钮 → 首次使用说明弹窗 → 开始扫码 →
+  /// 注入的假扫码器返回结果。
+  Future<FakeApi> runScanFlow(WidgetTester tester, String? scannedValue) async {
+    final api = FakeApi();
+    await _pumpHome(tester, api: api, queue: UploadQueue.memory(),
+        scannerBuilder: () async => scannedValue);
+    await tester.tap(find.byTooltip('扫码查询'));
+    await tester.pumpAndSettle();
+    expect(find.text('扫码速查'), findsOneWidget, reason: '首次使用必须有中文用途说明');
+    await tester.tap(find.text('开始扫码'));
+    await tester.pumpAndSettle();
+    return api;
+  }
+
+  testWidgets('扫码识别成功：自动填入输入框并立即查询，无需再点查询按钮', (tester) async {
+    final api = await runScanFlow(tester, 'SMU/T/2026-09');
+    expect(api.lookupQueries, contains('SMU/T/2026-09'),
+        reason: '扫码成功必须自动触发查询');
+    expect(find.text('SMU/T/2026-09'), findsOneWidget,
+        reason: '识别出的编号应自动填入输入框');
+    expect(find.textContaining('毛重超出1%容差'), findsOneWidget,
+        reason: '查询结果直接展示');
+  });
+
+  testWidgets('扫码到无关内容：清晰提示"未识别到有效编号"，不发起查询', (tester) async {
+    final api = await runScanFlow(tester, 'https://example.com/promo?x=1');
+    expect(api.lookupQueries, isEmpty, reason: '无效内容不浪费一次查询请求');
+    expect(find.textContaining('未识别到有效的单证编号'), findsWidgets);
+    // 手动输入路径依然可用
+    await tester.enterText(find.byType(TextField), 'SMU/T/2026-09');
+    await tester.tap(find.text('查询'));
+    await tester.pumpAndSettle();
+    expect(api.lookupQueries, contains('SMU/T/2026-09'));
+  });
+
+  testWidgets('取消扫码/权限拒绝返回：静默回到手动输入，无报错无查询', (tester) async {
+    final api = await runScanFlow(tester, null);
+    expect(api.lookupQueries, isEmpty);
+    expect(find.textContaining('未识别到有效的单证编号'), findsNothing,
+        reason: '用户主动取消不应报错');
+    // 手动输入查询依然可用（拒绝摄像头权限后的降级路径）
+    await tester.enterText(find.byType(TextField), 'MB-20260919-090000-11AA');
+    await tester.tap(find.text('查询'));
+    await tester.pumpAndSettle();
+    expect(api.lookupQueries, contains('MB-20260919-090000-11AA'));
   });
 }
