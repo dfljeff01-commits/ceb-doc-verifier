@@ -1,33 +1,41 @@
 # -*- coding: utf-8 -*-
 """
-中欧班列单证智能核验（初级版） —— Streamlit 前端。
+单据核对页（原单文件网页前端的展示层，webapp 双入口架构下的功能页）。
 
-数据流：sample_data/*.json（模拟OCR提取结果）
+数据流：sample_data/*.json / 向导上传 / App批次（PostgreSQL库内记录）
         -> verification_engine.run_verification()（核验规则全部在引擎中，本文件不做规则判断）
         -> 页面展示（汇总卡片 / 明细表格 / AI修正建议 / PDF导出 / 手动编辑实时复核）
+
+架构升级后的差异（相对旧 app.py 单体）：
+  - 登录后才能进入（见 webapp/Home.py），核验/查看请求携带登录令牌；
+  - 向导上传完成的批次持久化到 PostgreSQL（source=web，记录创建人）；
+  - 编辑字段/生成邮件/导出PDF等操作写操作日志（audit_logs，只增不改）。
 """
 
 import hashlib
 import io
-import llm_layer
 import json
-import os
+import llm_layer
 import re
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-import requests
 import streamlit as st
 
+import audit
 import chat_assistant
 import doc_contract
 import doc_rules
 import email_generator
 import knowledge_base
+import mobile_store
 import pdf_ingest
 import upload_wizard
 from llm_endpoint import resolve_endpoint
+from webapp import session
+from webapp.api_client import (API_URL, api_healthy, fetch_batch_full,
+                               run_verification_effective)
 
 from verification_engine import (
     STATUS_FAIL,
@@ -38,28 +46,7 @@ from verification_engine import (
 )
 from risk_model import GRADE_META
 
-SAMPLE_DIR = Path(__file__).parent / "sample_data"
-API_URL = os.environ.get("VERIFY_API_URL", "http://localhost:8000")
-
-
-@st.cache_data(ttl=10, show_spinner=False)
-def api_healthy() -> bool:
-    try:
-        return requests.get(f"{API_URL}/health", timeout=1.5).ok
-    except Exception:
-        return False
-
-
-def run_verification_effective(batch: dict) -> tuple[dict, str]:
-    """优先调用核验API（前后端分离形态）；API不可用时降级为进程内直连，保证使用不中断。"""
-    if api_healthy():
-        try:
-            resp = requests.post(f"{API_URL}/verify", json=batch, timeout=10)
-            resp.raise_for_status()
-            return resp.json(), "api"
-        except Exception:
-            pass
-    return run_verification(batch), "local"
+SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 
 BATCH_FILES = [
     ("batch_clean.json", "示例批次A：全部通过（干净数据）"),
@@ -89,52 +76,7 @@ GRADE_COLORS = {
 # 四步流程（P1 步骤指引）
 FLOW_STEPS = ["选择/上传单证", "核对识别结果", "查看核验报告", "生成整改材料"]
 
-APP_CSS = """
-<style>
-/* 来源选择：radio 卡片化（P0 首屏操作入口） */
-div[data-testid="stRadio"] label {
-    border: 1.5px solid #E5E7EB; border-radius: 12px; padding: 12px 16px;
-    background: #FFFFFF; margin: 2px 0; transition: all .12s ease; cursor: pointer;
-}
-div[data-testid="stRadio"] label:hover { border-color: #94A3B8; }
-div[data-testid="stRadio"] label:has(input:checked) {
-    border: 2px solid #0B5394; background: #EFF6FF;
-}
-/* 来源选择按钮组（与radio等价的备选形态） */
-div[data-testid="stButton"] > button { border-radius: 10px; }
-/* 步骤指示器 */
-.ceb-step { display:flex; gap:6px; margin:2px 0 14px; flex-wrap:wrap; }
-.ceb-step span {
-    display:inline-flex; align-items:center; gap:6px; font-size:12.5px;
-    padding:6px 13px; border-radius:999px; border:1px solid #E5E7EB;
-    color:#6B7280; background:#F9FAFB; font-weight:600;
-}
-.ceb-step span.done { color:#1B5E20; background:#E8F5E9; border-color:#A5D6A7; }
-.ceb-step span.cur { color:#0B5394; background:#EFF6FF; border-color:#0B5394;
-    box-shadow:0 1px 6px #0B539433; }
-/* 问题卡片（FAIL/WARNING） */
-.ceb-problem { border-radius:12px; padding:12px 16px; margin:10px 0;
-    border-left:6px solid; }
-.ceb-problem h4 { margin:0 0 6px 0; font-size:15px; }
-.ceb-problem .d { font-size:13.5px; color:#374151; margin:2px 0; }
-.ceb-problem .s { font-size:13px; color:#374151; background:#FFFFFFCC;
-    border-radius:8px; padding:8px 12px; margin-top:8px; }
-/* 通用小卡片 */
-.ceb-mini { border-radius:10px; padding:10px 14px; text-align:center; }
-.ceb-mini .v { font-size:26px; font-weight:800; line-height:1.2; }
-.ceb-mini .k { font-size:12px; color:#6B7280; font-weight:600; }
-/* 隐藏Streamlit自带的开发者工具栏/Deploy按钮（任务书问题五；
-   与 .streamlit/config.toml 的 toolbarMode="viewer" 双保险） */
-[data-testid="stToolbar"] { display: none !important; }
-[data-testid="stStatusWidget"] { display: none !important; }
-/* 按单据分组的分层结果卡片（任务书问题四） */
-.ceb-docgroup { border:1px solid #E5E7EB; border-radius:12px; padding:10px 14px;
-    margin:8px 0; background:#FFFFFF; }
-.ceb-docgroup .hd { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.ceb-docgroup .badge { font-size:12px; font-weight:700; border-radius:999px;
-    padding:2px 10px; border:1px solid; }
-</style>
-"""
+from webapp.styles import APP_CSS  # noqa: E402  (页面共用样式)
 
 
 def render_step_indicator(done_through: int, current: int) -> None:
@@ -796,6 +738,8 @@ def render_doc_field_editor(batch_id: str, doc: dict) -> tuple[dict, int]:
             fields.pop(key, None)     # 用户清空该字段 → 显式删除
         if _value_changed(fields.get(key), original if has_original else None):
             edited += 1
+            _audit_field_edit(batch_id, doc['doc_id'], key,
+                              original if has_original else None, fields.get(key))
     return fields, edited
 
 
@@ -820,116 +764,15 @@ def _doc_title(doc: dict) -> str:
 
 
 def reset_edits(batch: dict) -> None:
-    prefix = f"fld::{batch['batch_id']}::"
-    for key in list(st.session_state.keys()):
-        if key.startswith(prefix):
-            del st.session_state[key]
+    for prefix in (f"fld::{batch['batch_id']}::", f"fld_audit::{batch['batch_id']}::"):
+        for key in list(st.session_state.keys()):
+            if key.startswith(prefix):
+                del st.session_state[key]
     st.rerun()
 
 
 # ---------------------------------------------------------------- 页面主体
 
-st.set_page_config(
-    page_title="中欧班列单证智能核验",
-    page_icon="🚂",
-    layout="wide",
-)
-st.markdown(APP_CSS, unsafe_allow_html=True)
-
-st.title("🚂 中欧班列单证智能核验")
-st.caption("AI + 多式联运 · 单证交叉核验工具（初级版 · 内部试用）")
-st.info(SCENE_SENTENCE, icon="🎯")
-
-# ---------------- 第一步：选择单证来源（P0 卡片式入口） ----------------
-SOURCE_SAMPLE = "📁 示例批次（3组预置模拟数据，一键加载，推荐先看）"
-SOURCE_UPLOAD = "📎 上传PDF单证（向导式：声明构成→上传拆分→逐份确认→核验）"
-SOURCE_MOBILE = "📱 手机拍摄批次（输入App批次编号，查看现场上传的完整报告）"
-source_mode = st.radio(
-    "第一步 · 选择单证来源",
-    [SOURCE_SAMPLE, SOURCE_UPLOAD, SOURCE_MOBILE],
-    index=0,
-    key="source_mode",
-    label_visibility="collapsed",
-    horizontal=True,
-)
-
-_mode_upload = source_mode.startswith("📎")
-_mode_mobile = source_mode.startswith("📱")
-batch = None
-if not (_mode_upload or _mode_mobile):
-    labels = [label for _, label in BATCH_FILES]
-    batch_ids = [fn.removesuffix(".json") for fn, _ in BATCH_FILES]
-    # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与培训
-    default_index = (
-        batch_ids.index(st.query_params["batch"])
-        if "batch" in st.query_params and st.query_params["batch"] in batch_ids
-        else 0
-    )
-    chosen_col, desc_col = st.columns([1, 2])
-    with chosen_col:
-        chosen_index = labels.index(
-            st.selectbox("选择示例批次（模拟上传+OCR提取完成）", labels, index=default_index)
-        )
-    with desc_col:
-        batch = load_batch(BATCH_FILES[chosen_index][0])
-        st.markdown(
-            f'<div style="border:1px solid #E5E7EB; border-radius:12px; padding:10px 16px;'
-            f' background:#F9FAFB; font-size:13px; color:#374151;">'
-            f'<b>{batch.get("batch_name", "")}</b>　{batch.get("description", "")}'
-            f'<br><span style="color:#6B7280;">🚉 运输路径：{batch.get("destination_summary", "—")}'
-            f'　|　📎 已提取单证：'
-            f'{"、".join(d.get("title", d.get("doc_type", "")) for d in batch["documents"])}</span></div>',
-            unsafe_allow_html=True)
-    # 流程进度（P1 步骤指示：示例模式沿用四步指示）
-    _materials_used = any(
-        k.startswith(("email_generated_dv::", "chat::")) and v
-        for k, v in st.session_state.items())
-    render_step_indicator(2, 3 if not _materials_used else 4)
-
-# ---------------- 手机拍摄批次模式（现场触手定位：App只传照片，完整报告回电脑端看） ----------------
-
-_mobile_record = None
-if _mode_mobile:
-    if not api_healthy():
-        st.warning("手机批次的完整报告保存在核验API服务的 mobile_results/ 目录，"
-                   "请先启动后端：`uvicorn api:app --host 0.0.0.0 --port 8000`。")
-        st.stop()
-    _default_mobile_id = st.query_params.get("mobile_batch", "")
-    mobile_id = st.text_input(
-        "输入手机App上传后显示的批次编号（形如 MB-20260920-143001-8A3C）",
-        value=_default_mobile_id, key="mobile_batch_id", placeholder="MB-…").strip()
-    if not mobile_id:
-        st.info("现场用手机App拍照上传后，App只返回一句话摘要；在此输入批次编号即可查看"
-                "该批次的完整核验报告（明细、分数构成、AI建议都在电脑端看）。")
-        st.stop()
-    try:
-        _resp = requests.get(f"{API_URL}/mobile/batch/{mobile_id}",
-                             params={"include_full": "true"}, timeout=5)
-        if _resp.status_code == 404:
-            st.error(f"未找到批次 {mobile_id} 的核验记录——请核对编号，并确认App连接的是"
-                     f"同一台后端（当前 {API_URL}）。")
-            st.stop()
-        _resp.raise_for_status()
-        _mobile_record = _resp.json()
-    except Exception as e:
-        st.error(f"查询批次失败：{e}")
-        st.stop()
-    if not _mobile_record.get("verification"):
-        st.error("该批次记录缺少完整核验报告（可能由旧版本App上传），无法展示。")
-        st.stop()
-    _verif = _mobile_record["verification"]
-    batch = {
-        "batch_id": _mobile_record.get("batch_id", mobile_id),
-        "batch_name": _verif.get("batch_name") or f"App现场拍摄 {mobile_id}",
-        "destination_summary": "（手机App现场拍摄上传）",
-        "documents": _mobile_record.get("documents", []),
-    }
-    st.success(f"已加载手机批次 {_mobile_record.get('batch_id')} —— "
-               f"拍摄于 {_mobile_record.get('created_at', '—')}，"
-               f"风险等级：{_mobile_record.get('risk_label', '—')}（{_mobile_record.get('risk_level', '—')}）")
-    st.caption("App上的一句话结论：" + _mobile_record.get("one_line", "—"))
-
-# ---------------- PDF 上传模式辅助 ----------------
 
 
 def _file_sig(up_file) -> str:
@@ -948,114 +791,302 @@ def _file_sig(up_file) -> str:
     return f"{up_file.name}:{getattr(up_file, 'size', '?')}"
 
 
-# 侧边栏：功能入口与使用指引（P1：入口整理，不再承担来源选择主交互）
-with st.sidebar:
-    st.header("🧭 使用指引")
-    st.markdown(
-        "**上传模式（向导式）**\n\n"
-        "① 声明单据构成　→　② 逐类型上传（多单据PDF自动拆分）　→　"
-        "③ 逐份核对确认　→　④ 核验查看分层结果\n\n"
-        "**示例模式**\n\n"
-        "选择批次 → 核对字段 → 查看报告 → 生成整改材料\n\n"
-        "**手机批次模式**\n\n"
-        "现场App拍照上传 → 记下批次编号 → 在此输入查看完整报告")
-    st.divider()
-    st.header("🔗 功能入口")
-    st.markdown(
-        f"- [核验API文档（Swagger）]({API_URL}/docs)\n"
-        f"- [API健康检查]({API_URL}/health)")
-    st.caption("📱 Android App：现场拍照即传+速查（电脑端是大脑、手机端是触手），"
-               "完整处理与深度分析在本网页完成。见 mobile_app/INSTALL.md"
-               "（扫码分发：python serve_apk.py）；网页端建议 PC 浏览。")
-    st.divider()
-    st.caption("初级版 v1.5 · 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同")
+# ---------------------------------------------------------------- 辅助：留痕与入库
 
-# ---------------- 向导式上传模式（任务书问题二：声明→上传拆分→逐份确认→核验） ----------------
 
-wizard_batch = None
-edited_documents = None
-edited_count = 0
-if _mode_upload:
-    if not pdf_ingest.ocr_available():
-        st.warning("未检测到本机 tesseract OCR，扫描型PDF将无法提取文字（文本型PDF不受影响）。"
-                   "安装方法见 README。")
-    result = upload_wizard.render_upload_wizard(render_doc_field_editor)
-    if result is None:
-        st.stop()
-    wizard_batch, edited_documents, edited_count = result
-    batch = wizard_batch
+def _safe_audit(action, object_type, object_id, detail=None) -> None:
+    """操作留痕兜底封装：审计失败不阻断页面主流程（DB异常时页面仍可用）。"""
+    try:
+        audit.record(session.current_username(), action, object_type, object_id,
+                     detail=detail)
+    except Exception as exc:  # 审计存储不可用时降级为日志输出
+        print(f"[audit] 写入失败（{action}）: {exc}")
 
-if not (_mode_upload or _mode_mobile):
-    st.subheader("2️⃣ 单证字段（提取结果，可手动修改实时复核）")
-    # 示例模式：整批编辑（向导模式的逐份编辑已在第3步完成并快照）
-    edited_documents, edited_count = collect_edited_documents(batch)
-    c1, c2, _ = st.columns([1, 2, 3])
-    with c1:
-        if st.button("↺ 重置本批次修改", disabled=edited_count == 0):
-            reset_edits(batch)
-    with c2:
-        if edited_count:
-            st.markdown(f"<span style='color:#B26A00;font-weight:600;'>"
-                        f"✍️ 已手动修改 {edited_count} 个字段，以下核验结果已实时更新</span>",
-                        unsafe_allow_html=True)
 
-elif _mode_mobile:
-    # 手机批次：报告已在拍摄时核验完成，这里只读展示（完整明细见下方核验结果区），
-    # 不提供字段编辑——现场纠正应回单证来源处重拍/重传，保持结果可追溯。
-    edited_documents = batch["documents"]
-    edited_count = 0
+def _audit_field_edit(batch_id: str, doc_id: str, field: str, before, after) -> None:
+    """编辑字段留痕（同一改动去重）：记录修改前后的值（任务书 §3 审计要求）。"""
+    state_key = f"fld_audit::{batch_id}::{doc_id}::{field}"
+    after_json = doc_contract.canonical_json(after)
+    last_json = st.session_state.get(state_key)
+    if last_json == after_json:
+        return
+    st.session_state[state_key] = after_json
+    before_obj = before
+    if last_json is not None:
+        try:
+            before_obj = json.loads(last_json)
+        except (TypeError, ValueError):
+            before_obj = before
+    try:
+        audit.record(session.current_username(), audit.EDIT_FIELD, "field",
+                     f"{batch_id}/{doc_id}/{field}",
+                     before=before_obj, after=after)
+    except Exception as exc:
+        print(f"[audit] 编辑留痕失败: {exc}")
 
-# 核验（规则全部来自 verification_engine，本文件只做展示；优先走API，不可用时直连）
-if _mode_mobile:
-    # 手机批次直接使用拍摄时服务端核验并持久化的报告（与App一句话摘要同源同口径）
-    verification, verify_mode = _mobile_record["verification"], "api-store"
-else:
-    effective_batch = {**batch, "documents": edited_documents}
-    with st.spinner("核验计算中…"):
-        verification, verify_mode = run_verification_effective(effective_batch)
-summary = verification["summary"]
-st.caption("🔌 核验通道：" + (
-    f"FastAPI 服务（{API_URL}）—— 前后端分离形态" if verify_mode == "api"
-    else "手机批次（读取API服务端持久化的完整核验报告）" if verify_mode == "api-store"
-    else "进程内直连（未检测到核验API服务，启动 `uvicorn api:app --port 8000` 可切换为API形态"))
 
-# 核验结果汇总（P0：环形风险仪表为全页视觉焦点；导出按钮放标题行右侧）
-head_left, head_right = st.columns([4, 1])
-with head_left:
-    st.subheader("3️⃣ 核验结果汇总")
-with head_right:
-    pdf_bytes = build_pdf(batch, verification, edited_count, edited_documents)
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
-    st.download_button(
-        "⬇️ 导出PDF报告",
-        data=pdf_bytes,
-        file_name=f"核验报告_{batch['batch_id']}_{ts}.pdf",
-        mime="application/pdf",
-        width="stretch",
-        type="primary" if summary["fail"] or summary["warning"] else "secondary",
+def _persist_web_batch(batch: dict, verification: dict) -> None:
+    """向导完成的批次持久化到 PostgreSQL（source=web + 创建人）并留痕上传；
+    同一批次只在首次展示结果时入库一次（幂等标记），重复重跑不产生重复日志。"""
+    flag = f"web_batch_saved::{batch.get('batch_id')}"
+    if st.session_state.get(flag):
+        return
+    st.session_state[flag] = True
+    documents = batch.get("documents") or []
+    try:
+        mobile_store.save_batch(documents, verification, source="web",
+                                created_by=session.current_username())
+        _safe_audit(audit.UPLOAD_DOCS, "batch", batch.get("batch_id", ""),
+                    detail={"source": "web", "doc_count": len(documents),
+                            "risk_score": verification.get("risk", {}).get("score"),
+                            "rule_version": verification.get("rule_version", "")})
+    except Exception as exc:
+        st.session_state[flag] = False
+        st.warning(f"批次入库失败（本次查看不受影响，请检查数据库连接）：{exc}")
+
+
+def render_recent_batches() -> None:
+    """库内近期批次一览（PostgreSQL）：网页向导批次与App批次同库可见，
+    在"手机拍摄批次"模式输入编号即可查看完整报告。"""
+    with st.expander("🗂️ 库内近期批次（PostgreSQL，含网页上传与App现场上传）", expanded=False):
+        try:
+            rows = mobile_store.recent(10)
+        except Exception as exc:
+            st.caption(f"数据库暂不可用：{exc}")
+            return
+        if not rows:
+            st.caption("暂无历史批次。上传核验过的批次会自动保存在数据库中。")
+            return
+        st.dataframe(
+            [{"批次编号": r["batch_id"], "时间": r["created_at"],
+              "来源": "网页" if r["source"] == "web" else "App",
+              "创建人": r.get("created_by") or "—",
+              "风险": r.get("risk_label") or r.get("risk_level"),
+              "单证数": r.get("doc_count"),
+              "一句话结论": r.get("one_line")} for r in rows],
+            use_container_width=True, hide_index=True)
+        st.caption("查看完整报告：切换到「📱 手机拍摄批次」输入批次编号，"
+                   "或直接访问 网页地址/?mobile_batch=批次编号")
+
+
+# （编辑留痕挂接点由下方文本替换注入 render_doc_field_editor）
+
+
+def render() -> None:
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+
+    st.title("🚂 中欧班列单证智能核验")
+    st.caption("AI + 多式联运 · 单证交叉核验工具（初级版 · 内部试用）")
+    st.info(SCENE_SENTENCE, icon="🎯")
+
+    # ---------------- 第一步：选择单证来源（P0 卡片式入口） ----------------
+    SOURCE_SAMPLE = "📁 示例批次（3组预置模拟数据，一键加载，推荐先看）"
+    SOURCE_UPLOAD = "📎 上传PDF单证（向导式：声明构成→上传拆分→逐份确认→核验）"
+    SOURCE_MOBILE = "📱 手机拍摄批次（输入App批次编号，查看现场上传的完整报告）"
+    source_mode = st.radio(
+        "第一步 · 选择单证来源",
+        [SOURCE_SAMPLE, SOURCE_UPLOAD, SOURCE_MOBILE],
+        index=0,
+        key="source_mode",
+        label_visibility="collapsed",
+        horizontal=True,
     )
-render_risk_dashboard(verification["risk"], summary)
 
-# 核验结果（任务书问题四：分层结构——总评分 → 按单据实例分组 → 字段级问题+修改建议）
-render_document_groups(verification)
-render_kb_basis(verification["results"])
-render_ai_reasoning(verification["results"], edited_documents)
+    _mode_upload = source_mode.startswith("📎")
+    _mode_mobile = source_mode.startswith("📱")
+    batch = None
+    if not (_mode_upload or _mode_mobile):
+        labels = [label for _, label in BATCH_FILES]
+        batch_ids = [fn.removesuffix(".json") for fn, _ in BATCH_FILES]
+        # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与培训
+        default_index = (
+            batch_ids.index(st.query_params["batch"])
+            if "batch" in st.query_params and st.query_params["batch"] in batch_ids
+            else 0
+        )
+        chosen_col, desc_col = st.columns([1, 2])
+        with chosen_col:
+            chosen_index = labels.index(
+                st.selectbox("选择示例批次（模拟上传+OCR提取完成）", labels, index=default_index)
+            )
+        with desc_col:
+            batch = load_batch(BATCH_FILES[chosen_index][0])
+            st.markdown(
+                f'<div style="border:1px solid #E5E7EB; border-radius:12px; padding:10px 16px;'
+                f' background:#F9FAFB; font-size:13px; color:#374151;">'
+                f'<b>{batch.get("batch_name", "")}</b>　{batch.get("description", "")}'
+                f'<br><span style="color:#6B7280;">🚉 运输路径：{batch.get("destination_summary", "—")}'
+                f'　|　📎 已提取单证：'
+                f'{"、".join(d.get("title", d.get("doc_type", "")) for d in batch["documents"])}</span></div>',
+                unsafe_allow_html=True)
+        # 流程进度（P1 步骤指示：示例模式沿用四步指示）
+        _materials_used = any(
+            k.startswith(("email_generated_dv::", "chat::")) and v
+            for k, v in st.session_state.items())
+        render_step_indicator(2, 3 if not _materials_used else 4)
 
-# 第四步：生成整改材料（P1 分组导航）
-st.markdown("###### 4️⃣ 生成整改材料")
-render_email_generator(verification, edited_documents)
-# 对话助手收进默认折叠的展开器：chat_input 挂载时会自动聚焦并把页面滚到底部，
-# 折叠后首屏保持在顶部；用户点开时再聚焦正合适。
-with st.expander("💬 向AI追问（对话式核验助手）——点击展开", expanded=False):
-    render_chat_assistant(verification, edited_documents)
+    # ---------------- 手机拍摄批次模式（现场触手定位：App只传照片，完整报告回电脑端看） ----------------
 
-# 原始单证数据
-with st.expander("🔍 查看原始单证数据（识别提取结果JSON）"):
-    st.json(edited_documents)
+    _mobile_record = None
+    if _mode_mobile:
+        if not api_healthy():
+            st.warning("手机批次的完整报告保存在核验服务端的 PostgreSQL 数据库中，"
+                       "请先启动后端：`uvicorn api:app --host 0.0.0.0 --port 8000`。")
+            st.stop()
+        _default_mobile_id = st.query_params.get("mobile_batch", "")
+        mobile_id = st.text_input(
+            "输入手机App上传后显示的批次编号（形如 MB-20260920-143001-8A3C）",
+            value=_default_mobile_id, key="mobile_batch_id", placeholder="MB-…").strip()
+        if not mobile_id:
+            st.info("现场用手机App拍照上传后，App只返回一句话摘要；在此输入批次编号即可查看"
+                    "该批次的完整核验报告（明细、分数构成、AI建议都在电脑端看）。")
+            st.stop()
+        try:
+            _resp = fetch_batch_full(mobile_id)
+            if _resp.status_code == 401:
+                session.logout()
+                st.warning("登录状态已过期，请重新登录。")
+                st.rerun()
+            if _resp.status_code == 404:
+                st.error(f"未找到批次 {mobile_id} 的核验记录——请核对编号，并确认App连接的是"
+                         f"同一台后端（当前 {API_URL}）。")
+                st.stop()
+            _resp.raise_for_status()
+            _mobile_record = _resp.json()
+        except Exception as e:
+            st.error(f"查询批次失败：{e}")
+            st.stop()
+        if not _mobile_record.get("verification"):
+            st.error("该批次记录缺少完整核验报告（可能由旧版本App上传），无法展示。")
+            st.stop()
+        _verif = _mobile_record["verification"]
+        batch = {
+            "batch_id": _mobile_record.get("batch_id", mobile_id),
+            "batch_name": _verif.get("batch_name") or f"App现场拍摄 {mobile_id}",
+            "destination_summary": "（手机App现场拍摄上传）",
+            "documents": _mobile_record.get("documents", []),
+        }
+        _uploader = _mobile_record.get('created_by') or '—'
+        st.success(f"已加载手机批次 {_mobile_record.get('batch_id')} —— "
+                   f"拍摄于 {_mobile_record.get('created_at', '—')}（上传人：{_uploader}），"
+                   f"风险等级：{_mobile_record.get('risk_label', '—')}（{_mobile_record.get('risk_level', '—')}）")
+        st.caption("App上的一句话结论：" + _mobile_record.get("one_line", "—"))
 
-st.divider()
-st.caption(
-    "本系统为初级版（内部试用）：核验规则为简化规则集，路线规则仅覆盖中欧班列国际铁路联运"
-    "场景（每条路线结果附版本与适用范围），识别结果可能存在误差；结论供人工复核参考，"
-    "不构成自动放行依据。欢迎通过一线使用反馈问题与需求，推动系统持续迭代。"
-)
+    render_recent_batches()
+
+    # 侧边栏：功能入口与使用指引（P1：入口整理，不再承担来源选择主交互）
+    with st.sidebar:
+        st.header("🧭 使用指引")
+        st.markdown(
+            "**上传模式（向导式）**\n\n"
+            "① 声明单据构成　→　② 逐类型上传（多单据PDF自动拆分）　→　"
+            "③ 逐份核对确认　→　④ 核验查看分层结果\n\n"
+            "**示例模式**\n\n"
+            "选择批次 → 核对字段 → 查看报告 → 生成整改材料\n\n"
+            "**手机批次模式**\n\n"
+            "现场App拍照上传 → 记下批次编号 → 在此输入查看完整报告")
+        st.divider()
+        st.header("🔗 功能入口")
+        st.markdown(
+            f"- [核验API文档（Swagger）]({API_URL}/docs)\n"
+            f"- [API健康检查]({API_URL}/health)")
+        st.caption("📱 Android App：现场拍照即传+速查（电脑端是大脑、手机端是触手），"
+                   "完整处理与深度分析在本网页完成。见 mobile_app/INSTALL.md"
+                   "（扫码分发：python serve_apk.py）；网页端建议 PC 浏览。")
+        st.divider()
+        st.caption("初级版 v2.0 · PostgreSQL存储 · 登录鉴权 · 操作留痕 ·"
+                   " 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同")
+
+    # ---------------- 向导式上传模式（任务书问题二：声明→上传拆分→逐份确认→核验） ----------------
+
+    wizard_batch = None
+    edited_documents = None
+    edited_count = 0
+    if _mode_upload:
+        if not pdf_ingest.ocr_available():
+            st.warning("未检测到本机 tesseract OCR，扫描型PDF将无法提取文字（文本型PDF不受影响）。"
+                       "安装方法见 README。")
+        result = upload_wizard.render_upload_wizard(render_doc_field_editor)
+        if result is None:
+            st.stop()
+        wizard_batch, edited_documents, edited_count = result
+        batch = wizard_batch
+
+    if not (_mode_upload or _mode_mobile):
+        st.subheader("2️⃣ 单证字段（提取结果，可手动修改实时复核）")
+        # 示例模式：整批编辑（向导模式的逐份编辑已在第3步完成并快照）
+        edited_documents, edited_count = collect_edited_documents(batch)
+        c1, c2, _ = st.columns([1, 2, 3])
+        with c1:
+            if st.button("↺ 重置本批次修改", disabled=edited_count == 0):
+                reset_edits(batch)
+        with c2:
+            if edited_count:
+                st.markdown(f"<span style='color:#B26A00;font-weight:600;'>"
+                            f"✍️ 已手动修改 {edited_count} 个字段，以下核验结果已实时更新</span>",
+                            unsafe_allow_html=True)
+
+    elif _mode_mobile:
+        # 手机批次：报告已在拍摄时核验完成，这里只读展示（完整明细见下方核验结果区），
+        # 不提供字段编辑——现场纠正应回单证来源处重拍/重传，保持结果可追溯。
+        edited_documents = batch["documents"]
+        edited_count = 0
+
+    # 核验（规则全部来自 verification_engine，本文件只做展示；优先走API，不可用时直连）
+    if _mode_mobile:
+        # 手机批次直接使用拍摄时服务端核验并持久化的报告（与App一句话摘要同源同口径）
+        verification, verify_mode = _mobile_record["verification"], "api-store"
+    else:
+        effective_batch = {**batch, "documents": edited_documents}
+        with st.spinner("核验计算中…"):
+            verification, verify_mode = run_verification_effective(effective_batch)
+        if _mode_upload and wizard_batch is not None:
+            _persist_web_batch(effective_batch, verification)
+    summary = verification["summary"]
+    st.caption("🔌 核验通道：" + (
+        f"FastAPI 服务（{API_URL}）—— 前后端分离形态" if verify_mode == "api"
+        else "手机批次（读取API服务端持久化的完整核验报告）" if verify_mode == "api-store"
+        else "进程内直连（未检测到核验API服务，启动 `uvicorn api:app --port 8000` 可切换为API形态"))
+
+    # 核验结果汇总（P0：环形风险仪表为全页视觉焦点；导出按钮放标题行右侧）
+    head_left, head_right = st.columns([4, 1])
+    with head_left:
+        st.subheader("3️⃣ 核验结果汇总")
+    with head_right:
+        pdf_bytes = build_pdf(batch, verification, edited_count, edited_documents)
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        st.download_button(
+            "⬇️ 导出PDF报告",
+            data=pdf_bytes,
+            file_name=f"核验报告_{batch['batch_id']}_{ts}.pdf",
+            mime="application/pdf",
+            width="stretch",
+            type="primary" if summary["fail"] or summary["warning"] else "secondary",
+            on_click=_safe_audit, args=(audit.GENERATE_REPORT_PDF, "batch",
+                                        batch["batch_id"], None),
+        )
+    render_risk_dashboard(verification["risk"], summary)
+
+    # 核验结果（任务书问题四：分层结构——总评分 → 按单据实例分组 → 字段级问题+修改建议）
+    render_document_groups(verification)
+    render_kb_basis(verification["results"])
+    render_ai_reasoning(verification["results"], edited_documents)
+
+    # 第四步：生成整改材料（P1 分组导航）
+    st.markdown("###### 4️⃣ 生成整改材料")
+    render_email_generator(verification, edited_documents)
+    # 对话助手收进默认折叠的展开器：chat_input 挂载时会自动聚焦并把页面滚到底部，
+    # 折叠后首屏保持在顶部；用户点开时再聚焦正合适。
+    with st.expander("💬 向AI追问（对话式核验助手）——点击展开", expanded=False):
+        render_chat_assistant(verification, edited_documents)
+
+    # 原始单证数据
+    with st.expander("🔍 查看原始单证数据（识别提取结果JSON）"):
+        st.json(edited_documents)
+
+    st.divider()
+    st.caption(
+        "本系统为初级版（内部试用）：核验规则为简化规则集，路线规则仅覆盖中欧班列国际铁路联运"
+        "场景（每条路线结果附版本与适用范围），识别结果可能存在误差；结论供人工复核参考，"
+        "不构成自动放行依据。欢迎通过一线使用反馈问题与需求，推动系统持续迭代。"
+    )

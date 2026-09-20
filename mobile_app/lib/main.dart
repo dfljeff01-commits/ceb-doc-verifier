@@ -537,9 +537,16 @@ Future<Directory> defaultQueueDir() async {
 // ---------------------------------------------------------------- API 客户端
 
 class ApiClient {
-  ApiClient(this.baseUrl);
+  ApiClient(this.baseUrl, {this.token});
 
   final String baseUrl;
+
+  /// 登录令牌（登录页获取，SharedPreferences持久化，过期后由服务端401识别）
+  final String? token;
+
+  Map<String, String> get _baseHeaders => (token == null || token!.isEmpty)
+      ? <String, String>{}
+      : <String, String>{'Authorization': 'Bearer $token'};
 
   /// 拍照即传：POST /mobile/quick-check（多张照片一次提交）→ 一句话摘要。
   Future<QuickCheckResult> quickCheck(List<QueuedPhoto> photos,
@@ -550,8 +557,12 @@ class ApiClient {
       req.files.add(http.MultipartFile.fromBytes('files', await readBytes(p),
           filename: p.fileName));
     }
+    req.headers.addAll(_baseHeaders);
     final resp = await req.send().timeout(const Duration(seconds: 120));
     final body = await resp.stream.bytesToString();
+    if (resp.statusCode == 401) {
+      throw AuthExpiredException();
+    }
     if (resp.statusCode == 503) {
       throw ApiException('后端未安装OCR环境：${_detail(body)}');
     }
@@ -568,9 +579,13 @@ class ApiClient {
   Future<List<LookupMatch>> lookup(String query) async {
     final uri = Uri.parse('$baseUrl/mobile/lookup')
         .replace(queryParameters: {'q': query});
-    final resp = await http
-        .get(uri, headers: {'Content-Type': 'application/json'})
-        .timeout(const Duration(seconds: 15));
+    final resp = await http.get(uri, headers: {
+      'Content-Type': 'application/json',
+      ..._baseHeaders,
+    }).timeout(const Duration(seconds: 15));
+    if (resp.statusCode == 401) {
+      throw AuthExpiredException();
+    }
     if (resp.statusCode != 200) {
       throw ApiException('查询失败（HTTP ${resp.statusCode}）：${_detail(resp.body)}');
     }
@@ -596,6 +611,86 @@ class ApiException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// 登录过期/无效（服务端401）：调用方应清除本地凭证并回到登录页。
+class AuthExpiredException implements Exception {
+  @override
+  String toString() => '登录已过期，请重新登录';
+}
+
+/// 本地登录凭证（SharedPreferences: auth_token / auth_user / auth_expires）。
+class Session {
+  static Future<String?> token() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('auth_token');
+  }
+
+  static Future<String?> username() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('auth_user');
+  }
+
+  static Future<void> save(
+      {required String token, required String username, String? expiresAt}) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('auth_token', token);
+    await prefs.setString('auth_user', username);
+    if (expiresAt != null) await prefs.setString('auth_expires', expiresAt);
+  }
+
+  static Future<void> clear() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('auth_token');
+    await prefs.remove('auth_user');
+    await prefs.remove('auth_expires');
+  }
+}
+
+/// 用户名+密码登录（POST /auth/login）。失败抛 ApiException（可读原因）。
+Future<LoginSuccess> apiLogin(
+    String baseUrl, String username, String password) async {
+  final uri = Uri.parse('$baseUrl/auth/login');
+  final resp = await http.post(uri,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'username': username, 'password': password}),
+      ).timeout(const Duration(seconds: 15));
+  final body = resp.body;
+  if (resp.statusCode == 401) {
+    throw ApiException(ApiClient._detail(body));
+  }
+  if (resp.statusCode != 200) {
+    throw ApiException('登录失败（HTTP ${resp.statusCode}）');
+  }
+  final j = jsonDecode(body) as Map<String, dynamic>;
+  final user = (j['user'] ?? {}) as Map<String, dynamic>;
+  final success = LoginSuccess(
+    token: (j['access_token'] ?? '').toString(),
+    username: (user['username'] ?? username).toString(),
+    role: (user['role_label'] ?? user['role'] ?? '').toString(),
+    expiresAt: (j['expires_at'] ?? '').toString(),
+  );
+  if (success.token.isEmpty) {
+    throw ApiException('登录响应缺少令牌，请联系管理员');
+  }
+  await Session.save(
+      token: success.token,
+      username: success.username,
+      expiresAt: success.expiresAt);
+  return success;
+}
+
+class LoginSuccess {
+  LoginSuccess(
+      {required this.token,
+      required this.username,
+      required this.role,
+      required this.expiresAt});
+
+  final String token;
+  final String username;
+  final String role;
+  final String expiresAt;
 }
 
 String friendlyError(Object e) {
@@ -630,7 +725,190 @@ class CebApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0B5394)),
         useMaterial3: true,
       ),
-      home: HomePage(queueDirBuilder: queueDirBuilder),
+      home: AuthGate(queueDirBuilder: queueDirBuilder),
+    );
+  }
+}
+
+// ---------------------------------------------------------------- 登录门禁
+
+/// 启动门禁：本地有令牌直接进首页（避免每次打开都要重新登录），否则进登录页。
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key, this.queueDirBuilder});
+
+  final Future<Directory> Function()? queueDirBuilder;
+
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  String? _token;
+  bool _checked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Session.token().then((t) {
+      if (mounted) {
+        setState(() {
+          _token = t;
+          _checked = true;
+        });
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_checked) {
+      // 首帧：本地凭证读取中
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    final hasToken = _token != null && _token!.isNotEmpty;
+    return hasToken
+        ? HomePage(queueDirBuilder: widget.queueDirBuilder)
+        : LoginPage();
+  }
+}
+
+/// 登录页：用户名+密码（内部系统口径），成功后本地保存令牌。
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final _username = TextEditingController();
+  final _password = TextEditingController();
+  String _baseUrl = 'http://192.168.5.44:8000';
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance().then((prefs) {
+      if (mounted) {
+        setState(() => _baseUrl = prefs.getString('api_base') ?? _baseUrl);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _username.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final name = _username.text.trim();
+    if (name.isEmpty || _password.text.isEmpty) {
+      setState(() => _error = '请输入用户名和密码');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await apiLogin(_baseUrl, name, _password.text);
+      if (!mounted) return;
+      Navigator.pushReplacement(context,
+          // 首页自行从 Session 读取令牌；登录名在设置页展示
+          MaterialPageRoute(builder: (_) => const HomePage()));
+    } on SocketException {
+      setState(() => _error = '无法连接后端 $_baseUrl，请在登录后于设置中检查地址');
+    } on TimeoutException {
+      setState(() => _error = '连接超时，请确认网络与后端地址');
+    } catch (e) {
+      setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(28),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('🚂 中欧班列单证核验 · 现场版',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Text('内部系统 · 请使用公司分配的账号登录',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 13.5, color: Colors.grey.shade600)),
+                const SizedBox(height: 28),
+                TextField(
+                  controller: _username,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: '用户名',
+                    prefixIcon: Icon(Icons.person_outline),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _password,
+                  obscureText: true,
+                  onSubmitted: (_) => _submit(),
+                  decoration: const InputDecoration(
+                    labelText: '密码',
+                    prefixIcon: Icon(Icons.lock_outline),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  Text(_error!,
+                      style:
+                          const TextStyle(color: Colors.red, fontSize: 13.5)),
+                ],
+                const SizedBox(height: 20),
+                FilledButton(
+                  onPressed: _busy ? null : _submit,
+                  style: FilledButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 15)),
+                  child: _busy
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child:
+                              CircularProgressIndicator(strokeWidth: 2.4))
+                      : const Text('登 录', style: TextStyle(fontSize: 17)),
+                ),
+                const SizedBox(height: 10),
+                TextButton(
+                  onPressed: () async {
+                    final url = await Navigator.push<String>(context,
+                        MaterialPageRoute(builder: (_) => SettingsPage(initial: _baseUrl)));
+                    if (url != null && url.isNotEmpty && mounted) {
+                      final prefs = await SharedPreferences.getInstance();
+                      await prefs.setString('api_base', url);
+                      setState(() => _baseUrl = url);
+                    }
+                  },
+                  child: Text('后端地址设置（当前：$_baseUrl）',
+                      style: const TextStyle(fontSize: 13)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -659,9 +937,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _baseUrl = 'http://192.168.5.44:8000';
   UploadQueue? _queue; // 弱网暂存队列（initState加载）
   Timer? _retryTimer;
+  String? _token; // 登录令牌（AuthGate保证已登录才会进入本页）
 
   /// 每次取用时按当前设置构造（设置页改地址后立即生效，测试可注入假客户端）。
-  ApiClient get _api => widget.apiFactory?.call(_baseUrl) ?? ApiClient(_baseUrl);
+  ApiClient get _api =>
+      widget.apiFactory?.call(_baseUrl) ?? ApiClient(_baseUrl, token: _token);
 
   QuickCheckResult? _latest; // 最近一次一句话反馈（本地缓存，杀App也在）
   List<QuickCheckResult> _history = []; // 最近反馈（最多20条）
@@ -719,6 +999,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() {
       _baseUrl = prefs.getString('api_base') ?? _baseUrl;
+      _token = prefs.getString('auth_token');
       _queue = queue;
       _history = history;
       _latest = _history.isNotEmpty ? _history.first : null;
@@ -838,6 +1119,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             _latest = result;
             _statusMsg = queue.hasPending ? '还有${queue.items.length}张待传…' : '';
           });
+        } on AuthExpiredException {
+          await queue.markFailed(batch.first, '登录已过期，重新登录后自动重传');
+          if (mounted) _forceRelogin();
+          break;
         } catch (e) {
           await queue.markFailed(batch.first, friendlyError(e));
           if (mounted) {
@@ -856,6 +1141,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         setState(() => _uploading = false);
       }
     }
+  }
+
+  /// 登录过期：清除本地凭证并回到登录页（重新登录后队列自动继续重传）。
+  Future<void> _forceRelogin() async {
+    await Session.clear();
+    if (!mounted) return;
+    Navigator.pushAndRemoveUntil(context,
+        MaterialPageRoute(builder: (_) => LoginPage()), (_) => false);
   }
 
   void _toast(String msg, {bool error = false}) {
@@ -882,6 +1175,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final matches = await _api.lookup(q);
       if (!mounted) return;
       setState(() => _lookupResults = matches);
+    } on AuthExpiredException {
+      if (mounted) _forceRelogin();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -1322,6 +1617,7 @@ class SettingsPage extends StatefulWidget {
 
   final String initial;
 
+
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
@@ -1344,10 +1640,33 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('后端地址设置')),
+      appBar: AppBar(title: const Text('设置')),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          FutureBuilder<String?>(
+            future: Session.username(),
+            builder: (context, snap) => Card(
+              color: const Color(0xFFEFF6FF),
+              child: ListTile(
+                leading: const Icon(Icons.verified_user_outlined),
+                title: Text('已登录：${snap.data ?? '—'}',
+                    style: const TextStyle(fontSize: 15)),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.logout),
+            label: const Text('退出登录'),
+            onPressed: () async {
+              await Session.clear();
+              if (!context.mounted) return;
+              Navigator.pushAndRemoveUntil(context,
+                  MaterialPageRoute(builder: (_) => LoginPage()), (_) => false);
+            },
+          ),
+          const SizedBox(height: 12),
           TextField(
             controller: _controller,
             keyboardType: TextInputType.url,

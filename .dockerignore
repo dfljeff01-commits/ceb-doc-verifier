@@ -4,3 +4,17 @@ __pycache__/
 *.log
 api_run.log
 streamlit_run.log
+# 密钥/本地配置绝不进镜像
+.env
+# 版本库与本地产物
+.git/
+.gitignore
+# 历史备份/审查产物/移动端源码（镜像不需要）
+mobile_results/
+mobile_app/
+_cto_review/
+_fix_evidence/
+reports/
+evaluation_set_calibration/
+.pytest_cache/
+docker-compose*.yml

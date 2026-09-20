@@ -15,3 +15,14 @@ pyyaml==6.0.3
 pdf2image==1.17.0
 pytesseract==0.3.13
 pillow==12.3.0
+# ---- 架构升级新增：PostgreSQL + 登录鉴权 ----
+# PostgreSQL 驱动（连接池见 db.py）
+psycopg2-binary==2.9.10
+# 密码哈希（bcrypt，绝不明文/可逆存储）
+bcrypt==4.2.1
+# 登录令牌（JWT HS256）
+PyJWT==2.10.1
+# 业务时区转换（容器内 zoneinfo 数据源）
+tzdata==2025.2
+# 网页端 → API 调用（此前经传递依赖可用，现固定版本）
+requests==2.32.5

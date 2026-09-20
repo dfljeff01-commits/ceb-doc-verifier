@@ -254,7 +254,7 @@ def _load_render_email_generator(fake_st):
 
     import doc_contract
 
-    src = (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+    src = (Path(__file__).parent / "webapp" / "doc_verify.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     funcs, assigns = [], []
     for node in tree.body:
@@ -321,7 +321,7 @@ def test_upload_cache_signature_uses_content_hash():
     import ast
     import hashlib
 
-    src = (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+    src = (Path(__file__).parent / "webapp" / "doc_verify.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     funcs = []
     for node in tree.body:
@@ -409,7 +409,7 @@ def _load_collect_edited_documents(fake_st):
 
     import doc_contract
 
-    src = (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+    src = (Path(__file__).parent / "webapp" / "doc_verify.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     funcs, assigns, editable = [], [], None
     for node in tree.body:
@@ -426,7 +426,12 @@ def _load_collect_edited_documents(fake_st):
                     if t.id == "EDITABLE_FIELDS":
                         editable = ast.literal_eval(node.value)
     ns = {"st": fake_st, "doc_contract": doc_contract,
-          "EDITABLE_FIELDS": editable, "_WAYBILL_UNSET": "（不设置/留空）"}
+          "EDITABLE_FIELDS": editable, "_WAYBILL_UNSET": "（不设置/留空）",
+          # 编辑留痕在沙盒中以桩替代（行为由 test_audit 覆盖）
+          "_audit_field_edit": lambda *a, **k: None,
+          "session": type("S", (), {"current_username": staticmethod(lambda: "t")})(),
+          "audit": type("A", (), {"EDIT_FIELD": "EDIT_FIELD",
+                                  "record": staticmethod(lambda *a, **k: 0)})()}
     exec(compile(ast.Module(body=assigns + funcs, type_ignores=[]), "app_ui", "exec"), ns)
     return ns["collect_edited_documents"]
 

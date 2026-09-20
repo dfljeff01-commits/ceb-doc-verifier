@@ -1,22 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-核验服务 API（升级任务书·工程化加固 + App任务书·图片摄取）。
+核验服务 API（架构升级：PostgreSQL存储 + 登录鉴权 + 操作日志）。
 
 端点：
-  GET  /health         健康检查
+  GET  /health         健康检查（免鉴权，供容器探活）
+  POST /auth/login     用户名+密码登录 → JWT令牌（操作日志：登录/登录失败）
+  GET  /auth/me        当前登录用户信息
+  POST /auth/logout    登出（操作日志：登出；无状态令牌由客户端丢弃）
   POST /verify         批次JSON核验（返回明细+风险评分+建议+按单据分组分层结果）
   POST /ingest/image   图片摄取（App拍照/相册）：OCR → 类型识别 → 字段解析
   POST /ingest/pdf     PDF摄取：按页判型 → 文本直取/OCR → 字段解析（整份一份单据）
   POST /ingest/pdf/split  多单据PDF拆分摄取：识别单据边界，逐份返回（任务书问题一）
 
 App专用端点（产品定位"电脑端是大脑、手机端是触手"）：
-  POST /mobile/quick-check  现场拍照即传：OCR → 核验 → 持久化完整报告，
+  POST /mobile/quick-check  现场拍照即传：OCR → 核验 → PostgreSQL持久化完整报告，
                             只返回轻量摘要（风险等级红黄绿 + 一句话关键问题 + 批次编号），
                             不返回核验明细/分数构成/AI建议（这些留给电脑端）。
   GET  /mobile/batch/{id}   按批次编号取历史结果（默认轻量视图；include_full=true
-                            附完整核验报告与原始单证，供电脑端网页复查展示）。
+                            附完整核验报告与原始单据，供电脑端网页复查展示）。
   GET  /mobile/lookup        现场速查：按运单号/单证编号/箱号/批次编号检索
                             历史核验结论（轻量视图，按时间倒序）。
+
+鉴权口径（内部系统，用户名+密码）：
+  - 除 /health 外全部要求 Bearer 令牌（网页端登录后携带、App登录后本地保存）；
+  - 业务/管理员可用单据核验相关端点；财务角色本轮仅开放"数据核对"（占位），
+    对单据核验数据一律 403（边界待业务侧确认后再放开）；
+  - 关键操作写操作日志（audit_logs，只增不改）：登录/登出/登录失败、上传、
+    核验、查看完整报告。
 
 请求契约（修复 F08）：
   /verify 使用 Pydantic 模型严格校验请求体——结构错误（缺字段、类型错、null、
@@ -34,21 +44,103 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
 
+import audit
+import auth_service
+import db
 import doc_contract
 import mobile_store
 import pdf_ingest
 from verification_engine import run_verification
 
-API_VERSION = "1.5.0"
+API_VERSION = "2.0.0"
 
 app = FastAPI(
     title="中欧班列单证智能核验 API",
     description="上传单证批次JSON或PDF/图片文件，返回核验明细、风险评分与AI修正建议。",
     version=API_VERSION,
 )
+
+
+@app.on_event("startup")
+def _startup_init_db():
+    """服务进程启动时确保 schema 就绪（建表幂等；数据库不可达则快速失败，
+    由编排层重启——避免"网页假活、数据无处可写"的静默降级）。"""
+    db.init_schema()
+
+
+# ---------------------------------------------------------------- 登录鉴权
+
+# 可以使用单据核验功能的角色（财务角色对单据核验数据的可见性待业务侧确认，
+# 本轮默认不开放——只保留"数据核对"入口，见任务书 §2/§4）
+_DOC_VERIFY_ROLES = ("business", "admin")
+
+_security = HTTPBearer(auto_error=False, description="POST /auth/login 获取的JWT")
+
+
+def get_client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+def require_user(
+        credentials: HTTPAuthorizationCredentials | None = Depends(_security)) -> dict:
+    """Bearer JWT → 当前用户。缺失/过期/禁用一律 401。"""
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="未登录或缺少访问令牌",
+                            headers={"WWW-Authenticate": "Bearer"})
+    try:
+        return auth_service.verify_token(credentials.credentials)
+    except auth_service.AuthError as exc:
+        raise HTTPException(status_code=401, detail=exc.message,
+                            headers={"WWW-Authenticate": "Bearer"})
+
+
+def require_roles(*roles: str):
+    """角色门禁：不满足返回 403（已登录但无权限）。"""
+    def _dep(user: dict = Depends(require_user)) -> dict:
+        if user.get("role") not in roles:
+            raise HTTPException(status_code=403,
+                                detail="当前角色无权访问该功能")
+        return user
+    return _dep
+
+
+class LoginIn(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@app.post("/auth/login")
+def auth_login(body: LoginIn, request: Request):
+    """用户名+密码登录（内部系统口径）。成功返回JWT与用户信息；
+    失败返回401，并记录 LOGIN_FAILED 审计（含尝试用户名）。"""
+    ip = get_client_ip(request)
+    try:
+        user = auth_service.authenticate(body.username, body.password)
+    except auth_service.AuthError as exc:
+        audit.record(body.username or "anonymous", audit.LOGIN_FAILED,
+                     "user", body.username or "", detail={"reason": exc.message},
+                     ip=ip)
+        raise HTTPException(status_code=401, detail=exc.message)
+    token = auth_service.create_token(user)
+    audit.record(user["username"], audit.LOGIN, "user", user["username"], ip=ip)
+    return {**token, "user": user}
+
+
+@app.get("/auth/me")
+def auth_me(user: dict = Depends(require_user)):
+    return user
+
+
+@app.post("/auth/logout")
+def auth_logout(user: dict = Depends(require_user), request: Request = None):
+    """无状态JWT的登出=客户端丢弃令牌；服务端留痕审计。"""
+    audit.record(user["username"], audit.LOGOUT, "user", user["username"],
+                 ip=get_client_ip(request) if request else "")
+    return {"ok": True, "detail": "令牌已由客户端丢弃，请清除本地凭证"}
 
 # ---------------------------------------------------------------- 上传资源限制（F08）
 MAX_PDF_BYTES = 20 * 1024 * 1024        # 20MB
@@ -137,7 +229,8 @@ def health():
 
 
 @app.post("/verify")
-def verify(batch: BatchIn):
+def verify(batch: BatchIn,
+           user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES)),):
     """
     请求体即批次JSON（与 sample_data/*.json 同构）：
     {"batch_id": "...", "documents": [{"doc_type", "doc_id", "title", "fields": {...}}, ...],
@@ -152,7 +245,12 @@ def verify(batch: BatchIn):
                          detail, field, suggestion}]}],
       batch_level_issues: [无法归属单份单据的批次级问题]
     """
-    return run_verification(batch.model_dump())
+    verification = run_verification(batch.model_dump())
+    audit.record(user["username"], audit.VERIFY, "batch",
+                 batch.batch_id or "(未编号)",
+                 detail={"summary": verification.get("summary"),
+                         "risk_score": verification.get("risk", {}).get("score")})
+    return verification
 
 
 def _ingest_result_payload(r) -> dict:
@@ -171,7 +269,8 @@ def _ingest_result_payload(r) -> dict:
 
 
 @app.post("/ingest/image")
-async def ingest_image(file: UploadFile = File(...)):
+async def ingest_image(file: UploadFile = File(...),
+                       user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES))):
     """
     图片摄取（App拍照/相册）：上传单张图片（jpg/png），后端OCR识别并解析字段。
 
@@ -193,7 +292,8 @@ async def ingest_image(file: UploadFile = File(...)):
 
 
 @app.post("/ingest/pdf")
-async def ingest_pdf(file: UploadFile = File(...)):
+async def ingest_pdf(file: UploadFile = File(...),
+                     user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES))):
     """
     PDF摄取：按页判型（文本直取/扫描OCR）→ 类型识别 → 字段解析。
     整份PDF按一份单据处理；多单据混合PDF请用 /ingest/pdf/split。
@@ -213,7 +313,8 @@ async def ingest_pdf(file: UploadFile = File(...)):
 
 
 @app.post("/ingest/pdf/split")
-async def ingest_pdf_split(file: UploadFile = File(...)):
+async def ingest_pdf_split(file: UploadFile = File(...),
+                           user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES))):
     """
     多单据PDF摄取（任务书问题一）：按页信号识别单据边界，把一份包含多份
     独立单据（如多份运单）的PDF拆成逐份独立的识别结果。
@@ -258,6 +359,8 @@ async def ingest_pdf_split(file: UploadFile = File(...)):
 
 # ---------------------------------------------------------------- App专用端点（现场触手）
 
+
+
 MAX_QUICK_CHECK_PHOTOS = 5   # 现场一次拍摄整套单证（发票/箱单/运单/报关单/产地证）上限
 
 
@@ -266,6 +369,7 @@ def _mobile_lite_payload(record: dict) -> dict:
     return {
         "batch_id": record["batch_id"],
         "created_at": record["created_at"],
+        "created_by": record.get("created_by") or "",
         **record["lite"],
         "identity_numbers": record["identity_numbers"],
         "detail_hint": f"请在电脑端核验网页输入批次编号 {record['batch_id']} 查看完整报告",
@@ -274,7 +378,9 @@ def _mobile_lite_payload(record: dict) -> dict:
 
 @app.post("/mobile/quick-check")
 async def mobile_quick_check(
-        files: list[UploadFile] = File(..., description="现场拍摄的单证照片（1~5张）")):
+        request: Request,
+        files: list[UploadFile] = File(..., description="现场拍摄的单证照片（1~5张）"),
+        user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES))):
     """
     现场拍照即传（App专用）：上传1~5张单证照片，后端OCR识别 → 组装批次 →
     完整核验（与电脑端同一引擎）→ 持久化完整报告 → 只返回轻量摘要。
@@ -330,12 +436,20 @@ async def mobile_quick_check(
         "batch_name": f"App现场拍摄 {batch_id}",
         "documents": documents,
     })
-    record = mobile_store.save_batch(documents, verification)
+    record = mobile_store.save_batch(documents, verification,
+                                     created_by=user["username"])
+    audit.record(user["username"], audit.UPLOAD_DOCS, "batch",
+                 record["batch_id"],
+                 detail={"photos": len(files), "source": "mobile_app",
+                         "risk_grade": record["lite"]["risk_grade"],
+                         "one_line": record["lite"]["one_line"]},
+                 ip=get_client_ip(request))
     return _mobile_lite_payload(record)
 
 
 @app.get("/mobile/batch/{batch_id}")
-def mobile_get_batch(batch_id: str, include_full: bool = False):
+def mobile_get_batch(batch_id: str, include_full: bool = False,
+                     user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES))):
     """
     按批次编号查询历史结果。
     默认返回轻量视图（App现场速查口径：风险等级+一句话结论+编号索引）；
@@ -349,11 +463,13 @@ def mobile_get_batch(batch_id: str, include_full: bool = False):
     if include_full:
         payload["documents"] = record.get("documents", [])
         payload["verification"] = record.get("verification", {})
+        audit.record(user["username"], audit.VIEW_REPORT, "batch", batch_id)
     return payload
 
 
 @app.get("/mobile/lookup")
-def mobile_lookup(q: str, limit: int = 5):
+def mobile_lookup(q: str, limit: int = 5,
+                  user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES))):
     """
     现场速查（App专用）：按运单号/单证编号/箱号/批次编号检索历史核验结论。
     返回轻量视图列表（时间倒序，最多limit条），查无记录时 matches 为空列表。
@@ -361,11 +477,14 @@ def mobile_lookup(q: str, limit: int = 5):
     if not q or not q.strip():
         raise HTTPException(status_code=422, detail="查询条件不能为空（运单号/单证编号/批次编号）")
     matches = mobile_store.lookup(q.strip(), limit=min(max(limit, 1), 20))
+    audit.record(user["username"], audit.QUICK_CHECK, "lookup", q.strip(),
+                 detail={"count": len(matches)})
     return {"query": q.strip(), "count": len(matches), "matches": matches}
 
 
 @app.get("/mobile/recent")
-def mobile_recent(limit: int = 20):
+def mobile_recent(limit: int = 20,
+                  user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES))):
     """最近上传批次一览（轻量视图，供运维/演示检查持久化结果）。"""
     return {"matches": mobile_store.recent(limit=min(max(limit, 1), 50))}
 

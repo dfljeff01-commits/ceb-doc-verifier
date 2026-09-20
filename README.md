@@ -1,8 +1,13 @@
-# 🚂 中欧班列单证智能核验 Demo
+# 🚂 中欧班列单证智能核验系统（内部版）
 
 > **一句话场景**：中欧班列欧洲枢纽换装平均耗时38.7小时，单证不一致是主因之一——本工具在发运前自动核验单证一致性、齐全性与路线合规性，几秒内发现人工容易漏掉的单证问题，降低边境滞留与退运风险。
 
-面向"AI+行业"类竞赛的单点 AI 工具 Demo：上传真实 PDF 单证或加载模拟批次，系统自动完成 **判型 → 文字提取/OCR → 单据边界识别（多单据PDF拆分） → 字段解析 → 单据级规范检查 + 多维交叉核验 → 风险评分 → AI 修正建议**，输出结构化核验报告（红/黄/绿 + 可解释的风险分数构成 + **按单据实例分组的分层问题清单**），并支持一键导出 PDF 报告与 API 集成。
+**内部多人业务系统**（业务 + 财务共同使用）：上传真实 PDF 单证或加载模拟批次，系统自动完成 **判型 → 文字提取/OCR → 单据边界识别（多单据PDF拆分） → 字段解析 → 单据级规范检查 + 多维交叉核验 → 风险评分 → AI 修正建议**，输出结构化核验报告（红/黄/绿 + 可解释的风险分数构成 + **按单据实例分组的分层问题清单**），并支持一键导出 PDF 报告与 API 集成。
+
+> **⚠️ 持续维护原则：本系统仅限公司内部部署使用，不面向公网提供服务。**
+> 不申请公网域名、不做 ICP 备案；服务只发布在内部服务器/局域网；远程办公
+> 需要访问时走 Tailscale 等私有安全通道（见下方部署指南）。任何改动都不得
+> 把服务端口直接暴露到公网。
 
 ## 系统架构（混合AI叙事）
 
@@ -69,14 +74,20 @@ docker run -p 8501:8501 -p 8000:8000 ceb-doc-verifier
 # 同事访问: http://192.168.5.44:8501 （API文档: http://192.168.5.44:8000/docs）
 ```
 
-**远程分享（cloudflared 临时隧道，已实测可用）**：
+**远程访问（Tailscale，可选，按需启用）**：
 
-```bash
-cloudflared tunnel --url http://localhost:8501
-# 输出形如 https://xxxx.trycloudflare.com 的临时公网地址，演示结束关闭终端即失效。
-# ⚠️ 临时链接无身份验证：请勿分享给不信任的人，不要长时间挂着不关（2026-09-18 实测
-#    一次完整验证：HTTP 200、首屏正常渲染；验证后隧道已关闭）。
-```
+> 原则：**不做公网隧道、不做公网映射**（cloudflared/ngrok 等方式已废弃）。
+> 系统已内置登录鉴权，但仍只在私网发布。异地同事需要访问时，用 Tailscale
+> 把设备加入公司虚拟局域网后按内网地址访问：
+>
+> 1. 服务器与远程办公电脑分别安装 Tailscale 并登录同一公司账号（tailnet）；
+> 2. 无需改动任何部署配置（服务始终绑定 `0.0.0.0` 的内部端口，不绑定特定
+>    公网/私网IP，配置保持可迁移）；防火墙仅放行内网网段与 Tailscale 网段
+>    （100.64.0.0/10）；
+> 3. 远程同事用服务器的 Tailscale IP（100.x.x.x）访问
+>    `http://100.x.x.x:8501`（网页）与 `:8000`（API）。
+>
+> 本轮不要求实际配置 Tailscale，仅保留上述扩展空间。
 
 **界面体验（v1.5 向导式上传重构）**：
 
@@ -87,6 +98,102 @@ cloudflared tunnel --url http://localhost:8501
 - **配色统一**：红/黄/绿风险色在仪表盘、分组、明细、建议、知识库各区块使用同一组色值（GRADE_COLORS 唯一定义）；
 - **Streamlit Deploy 按钮已隐藏**（`.streamlit/config.toml` toolbarMode="viewer" + CSS 双保险），避免使用者误按平台部署入口；
 - **移动端说明**：Streamlit 窄屏下布局可纵向堆叠、无错位（390px 实测），但宽表格体验一般——**移动端请优先使用配套 Android App**（现场拍照即传+速查；完整处理与深度分析在本网页完成），网页端建议 PC 浏览（Streamlit 框架本身的局限，未做深度适配）。
+
+## 内部部署指南（v2.0 架构升级）
+
+v2.0 起系统为"网页 + API + PostgreSQL"三件套，`docker-compose.yml` 一键拉起；
+数据永久保存在 PostgreSQL，多人并发访问；登录鉴权 + 角色权限 + 操作日志（审计留痕）内置。
+
+### 3.1 前置条件
+
+- 公司内部服务器（局域网内可达），已安装 Docker 与 Docker Compose 插件；
+- 服务器防火墙仅对**内网网段**放行 `8501`（网页）与 `8000`（API）端口，
+  不得对公网映射（本系统不面向公网提供服务）。
+
+### 3.2 一键部署
+
+```bash
+# ① 在项目根目录准备环境配置（账密/密钥不进Git）
+cp .env.example .env
+#   编辑 .env：必须修改 POSTGRES_PASSWORD 与 AUTH_SECRET_KEY 为随机长字符串；
+#   种子账号密码（ADMIN/BUSINESS/FINANCE_INITIAL_PASSWORD）留空则首次启动
+#   生成随机密码打印到容器日志（只打印一次，请立即记录并修改）。
+
+# ② 构建并启动（应用 + PostgreSQL）
+docker compose up -d --build
+
+# ③ 查看启动日志：等待数据库就绪 → 自动建表 + 种子账号 → （如挂载了旧JSON则自动迁移）
+docker compose logs -f app
+```
+
+启动完成后：
+
+- 网页：`http://<内网服务器IP>:8501` —— 登录后进入首页，可见**单据核对**与
+  **数据核对**两个功能入口（按角色显示）；
+- API：`http://<内网服务器IP>:8000/docs`（除 `/health` 外均需登录令牌）。
+
+### 3.3 账号与角色（初版权限矩阵）
+
+| 角色 | 登录 | 单据核对（核验/上传/速查） | 数据核对 | 用户管理 | 操作日志 |
+|------|------|--------------------------|----------|----------|----------|
+| business 业务 | ✅ | ✅ | ❌ | ❌ | ❌ |
+| finance 财务 | ✅ | ❌（可见性待业务侧确认，本轮默认关闭） | ✅（建设中占位） | ❌ | ❌ |
+| admin 管理员 | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+- 首次启动自动创建 `admin` / `business` / `finance` 三个种子账号（密码来源见
+  `.env.example`）；登录后请立即在"用户管理"改密；
+- 密码以 **bcrypt 哈希**存储（绝不明文/可逆）；强度基线：≥8位且含字母与数字；
+- 登录方式：用户名+密码（内部系统口径，不做多因素认证）；网页端会话内持有
+  JWT（默认12小时，`AUTH_TOKEN_EXPIRE_HOURS` 可调），**App 登录后令牌保存在
+  手机本地**（SharedPreferences），无需每次重新登录，过期后自动回到登录页；
+- 角色边界后续调整只需改 `webapp/Home.py` 的 `ROLE_PAGES` 与 `api.py` 的
+  `_DOC_VERIFY_ROLES`。
+
+### 3.4 数据库与数据迁移
+
+- PostgreSQL 16 以独立容器运行（`docker-compose.yml` 的 `db` 服务），数据落
+  `pgdata` 卷持久化；仅在 Docker 内部网络可达，**不发布端口到主机/局域网**
+  （临时排查可放开 compose 中注释的 `127.0.0.1:15432` 映射）；
+- 连接信息全部来自环境变量（`DATABASE_URL` 或 `POSTGRES_*` 组合），不硬编码；
+- 正式表结构：`batches`（批次：编号/时间/来源[网页或App]/创建人/风险等级/总分/
+  完整核验快照）、`documents`（单据：所属批次/类型/实例序号/识别字段JSON/核验
+  状态）、`verification_issues`（核验问题：所属单据/问题字段/FAIL或WARNING/
+  规则版本/修改建议）、`users`（用户）、`audit_logs`（操作日志）；
+- **旧JSON数据迁移**：v1.x 的 `mobile_results/*.json` 是迁移前备份（只读保留）。
+  两种迁入方式任选：
+  - compose 挂载：`docker-compose.yml` 中放开
+    `./mobile_results:/app/mobile_results:ro`，启动时自动幂等迁入；
+  - 手动执行：`python migrate_json_to_pg.py`（带数据量对比与逐批次回读
+    深度比对，无损校验失败退出码为1）；`--verify-only` 只校验不写入；
+- 电脑端旧版核验历史为会话级状态（不落盘），无历史数据需要迁移；v2.0 起网页
+  上传的批次直接入库存档（`source=web`，记录创建人）。
+
+### 3.5 操作日志（审计留痕）
+
+- 记录：登录/登出/登录失败、上传单据、核验、编辑字段（含修改前后值）、查看
+  完整报告、生成邮件/导出PDF、现场速查、账号管理操作（创建/启用/禁用/改密）；
+- **只增不改双重保障**：应用层只提供 INSERT/SELECT（无任何修改/删除入口）；
+  数据库层触发器（`db.AUDIT_GUARD_SQL`）拒绝一切 UPDATE/DELETE/TRUNCATE；
+- 管理员在网页"操作日志"页按 操作人/操作类型/时间范围 筛选查看。
+
+### 3.6 数据库备份与恢复
+
+```bash
+docker exec ceb_db pg_dump -U ceb ceb_verify > backup_$(date +%F).sql   # 备份
+cat backup_2026-09-21.sql | docker exec -i ceb_db psql -U ceb ceb_verify  # 恢复
+```
+
+### 3.7 开发/测试环境的数据库
+
+本机跑 pytest 需要一个 PostgreSQL（存储层为核心路径，不静默跳过）：
+
+```bash
+docker run -d --name ceb-dev-pg -e POSTGRES_USER=ceb \
+  -e POSTGRES_PASSWORD=ceb_dev_pw -e POSTGRES_DB=ceb_verify \
+  -p 127.0.0.1:15433:5432 postgres:16-alpine
+# 项目根 .env 写入：DATABASE_URL=postgresql://ceb:ceb_dev_pw@127.0.0.1:15433/ceb_verify
+python -m pytest -v
+```
 
 ## 功能总览
 
@@ -224,16 +331,18 @@ PDF处理管线（按页路由，同一PDF可混合判型）：文本型PDF直�
 
 ### 8️⃣ 工程化
 
-- **API化**：FastAPI `/verify` 接收批次JSON返回核验报告+风险分+**按单据分组的分层结果（document_groups/batch_level_issues）**，可选 `declared_composition` 申报构成（Swagger：`http://localhost:8000/docs`）。**请求体用 Pydantic 模型严格校验**——结构错误返回422并指明具体字段；上传端点有**文件大小（图片10MB/PDF20MB→413）、页数（>20页→413）、处理耗时（>120s→504）三重限制**，OCR等阻塞操作在受限工作线程池执行。新增 **`POST /ingest/pdf/split`** 多单据PDF拆分摄取端点（返回逐份识别结果与 needs_confirmation 边界确认标记，供移动端/集成复用）。**App专用端点**（"电脑端是大脑、手机端是触手"定位配套）：`POST /mobile/quick-check`（拍照即传，OCR→核验→持久化完整报告，只返回轻量摘要：红/黄/绿+一句话关键问题+批次编号，不含明细）、`GET /mobile/lookup`（按运单号/单证编号/批次编号现场速查历史结论）、`GET /mobile/batch/{id}`（按批次编号取记录，`include_full=true` 附完整报告供电脑端网页复查），完整记录持久化于 `mobile_results/`（一批次一JSON，原子写）。Streamlit 优先走API（前后端分离），API未启动自动降级进程内直连并在页面标注当前通道；
+- **API化**：FastAPI `/verify` 接收批次JSON返回核验报告+风险分+**按单据分组的分层结果（document_groups/batch_level_issues）**，可选 `declared_composition` 申报构成（Swagger：`http://localhost:8000/docs`）。**请求体用 Pydantic 模型严格校验**——结构错误返回422并指明具体字段；上传端点有**文件大小（图片10MB/PDF20MB→413）、页数（>20页→413）、处理耗时（>120s→504）三重限制**，OCR等阻塞操作在受限工作线程池执行。新增 **`POST /ingest/pdf/split`** 多单据PDF拆分摄取端点（返回逐份识别结果与 needs_confirmation 边界确认标记，供移动端/集成复用）。**App专用端点**（"电脑端是大脑、手机端是触手"定位配套）：`POST /mobile/quick-check`（拍照即传，OCR→核验→持久化完整报告，只返回轻量摘要：红/黄/绿+一句话关键问题+批次编号，不含明细）、`GET /mobile/lookup`（按运单号/单证编号/批次编号现场速查历史结论）、`GET /mobile/batch/{id}`（按批次编号取记录，`include_full=true` 附完整报告供电脑端网页复查），完整记录持久化于 **PostgreSQL**（v2.0 起，见内部部署指南；v1 的 mobile_results/ JSON 目录仅作迁移前备份）。Streamlit 优先走API（前后端分离），API未启动自动降级进程内直连并在页面标注当前通道；
 - **数据版本**：邮件草稿、对话会话、PDF报告全部关联**单证内容哈希版本**（`doc_contract.data_version`）——字段编辑/换文件后旧草稿失效并提示重新生成，邮件**下载读取当前编辑后的文本**，上传缓存按**文件名+内容SHA256**判重；
-- **测试**：pytest 共 159 项（引擎+API契约 54 + 风险/语义/评估 23 + PDF摄取/拆分 19 + 多单据流程/知识库/分层结构 28 + 原生AI/数据版本 22 + **App移动端点 13**，含 F01-F10 全部审查反例回归与五类单据缺必填字段FAIL验收）；另有 `selftest.py`（28项验收自测，纯标准库）、`_selftest/upload_e2e.py`（向导式上传端到端）、`_selftest/visual_test.py`（示例批次视觉/交互）、`_selftest/live_ai_test.py`（真实LLM实测，需Key）；
+- **测试**：pytest 共 179 项（引擎+API契约 54 + 风险/语义/评估 23 + PDF摄取/拆分 19 + 多单据流程/知识库/分层结构 28 + 原生AI/数据版本 22 + **App移动端点 13**，含 F01-F10 全部审查反例回归与五类单据缺必填字段FAIL验收）；另有 `selftest.py`（28项验收自测，纯标准库）、`_selftest/upload_e2e.py`（向导式上传端到端）、`_selftest/visual_test.py`（示例批次视觉/交互）、`_selftest/live_ai_test.py`（真实LLM实测，需Key）；
 - **版本管理**：本项目自审查整改起使用 Git 仓库管理，修复按 F0x 分组提交，commit 信息可追溯；容器构建使用多阶段缓存并内置 HEALTHCHECK；APK 重建产物含 `.sha1` 哈希文件；
-- **容器化**：单镜像同时运行 API+网页，内置 tesseract-ocr + 中文包 chi_sim + poppler-utils，`docker build` + `docker run` 即用；`start.sh` 管理 API 进程生命周期（API退出则容器退出，网页不"假活"）；
+- **容器化**：`docker-compose.yml` 一键拉起 网页+API+PostgreSQL（内部部署标准形态，见部署指南）；应用镜像内置 tesseract-ocr + 中文包 chi_sim + poppler-utils；`start.sh` 管理 API 进程生命周期（API退出则容器退出，网页不"假活"）；
 - **依赖锁定**：requirements.txt 全部精确锁定实测版本（含上传路由所需 python-multipart、APK分发二维码所需 qrcode）。
 
 ## 自测与验证
 
 ```bash
+# 前置：pytest 需要 PostgreSQL（本机开发库见"内部部署指南 3.7"；
+# selftest.py 为纯引擎自测，不依赖数据库）
 python selftest.py                         # 规则引擎+评分+语义 验收自测（28项，含分层结构）
 python evaluation.py                       # 冻结留出集评估（只读评估集，输出evaluation_report.md）
 python evaluation.py --rebuild-calibration # 重新生成校准集（写入evaluation_set_calibration/）
@@ -315,12 +424,12 @@ ceb_doc_verifier/
 > 当前状态仅为**竞赛演示准入**目标；以下事项不解决不得用于真实业务单证审核或生产发布。
 
 **鉴权与访问隔离**
-- API 无鉴权，任何知道地址的调用方均可访问 `/verify`、`/ingest/*`；需增加身份认证与访问控制；
-- 手机端允许明文 HTTP 传输；生产需 TLS；
+- ~~API 无鉴权~~ **v2.0 已解决**：登录鉴权（bcrypt+JWT）+ 角色权限 + 操作日志（只增不改）已上线；财务角色对单据核验数据的可见边界待业务侧最终确认；
+- 手机端仍为明文 HTTP 传输（局域网内）；生产前建议 TLS（可在内网部署反向代理统一加 HTTPS）；
 - APK 使用 debug 签名侧载分发；正式发布需 release 签名与应用商店/MDM 渠道。
 
 **审计与溯源**
-- 需建立"原始文件 ↔ 人工修改记录 ↔ 使用的规则版本 ↔ 核验结果"全链路可追溯（当前 PDF 报告已带数据版本与规则版本戳，但人工编辑记录未持久化留痕）；
+- "原始文件 ↔ 人工修改记录 ↔ 使用的规则版本 ↔ 核验结果"链路：v2.0 已实现操作日志（编辑字段前后值、核验、上传等留痕，只增不改）；原始文件本体归档（PDF/影像存储）仍待建设；
 - 规则维护责任人、知识库来源与更新流程需制度化；
 - 正式发布 APK 需有源代码版本号、构建记录、产物哈希的可验证对应关系（本项目已用 Git 管理，产物含 .sha1，但仍需制度化发布流程）。
 

@@ -27,3 +27,6 @@ api_run.log
 Thumbs.db
 .DS_Store
 _tools/
+
+# 运行时数据目录（v1 JSON备份/迁移数据，不入库；迁移验证见 test_migration.py）
+mobile_results/

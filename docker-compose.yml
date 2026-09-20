@@ -1,0 +1,69 @@
+services:
+  # PostgreSQL：正式存储（batches/documents/verification_issues/users/audit_logs）。
+  # 仅在 Docker 内部网络可达，不对外发布端口；如需在服务器本机排查，
+  # 可临时放开下方被注释的映射（只绑 127.0.0.1，不暴露到局域网）。
+  db:
+    image: postgres:16-alpine
+    container_name: ceb_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ceb}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置数据库密码}
+      POSTGRES_DB: ${POSTGRES_DB:-ceb_verify}
+      # 数据按业务时区写入/展示（见 mobile_store.business_tz），库内存UTC即可
+      TZ: ${BUSINESS_TIMEZONE:-Asia/Shanghai}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ceb} -d ${POSTGRES_DB:-ceb_verify}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - internal
+    # 排查用（默认关闭）：
+    # ports:
+    #   - "127.0.0.1:15432:5432"
+
+  # 应用容器：核验API（8000）+ 网页（8501）+ 启动前置（等待DB/建表/种子账号/JSON迁移）
+  app:
+    build: .
+    image: ceb-doc-verifier:2.0.0
+    container_name: ceb_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # 数据库连接（内部Docker网络主机名 db；账密不硬编码、不进Git）
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ceb}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ceb_verify}
+      # 登录会话签名密钥（必填，部署时必须改成随机长字符串）
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:?请在 .env 中设置 AUTH_SECRET_KEY}
+      AUTH_TOKEN_EXPIRE_HOURS: ${AUTH_TOKEN_EXPIRE_HOURS:-12}
+      # 首次启动种子账号密码（users表为空时创建；不设则生成随机密码打印到日志一次）
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
+      BUSINESS_INITIAL_PASSWORD: ${BUSINESS_INITIAL_PASSWORD:-}
+      FINANCE_INITIAL_PASSWORD: ${FINANCE_INITIAL_PASSWORD:-}
+      # 业务时区（批次/日志时间展示口径）
+      BUSINESS_TIMEZONE: ${BUSINESS_TIMEZONE:-Asia/Shanghai}
+      # 网页 → API（容器内同机直连）
+      VERIFY_API_URL: http://localhost:8000
+    ports:
+      # 局域网服务端口：业务/财务从内网直接访问这两个端口
+      - "${APP_API_PORT:-8000}:8000"
+      - "${APP_WEB_PORT:-8501}:8501"
+    volumes:
+      # 可选：挂载旧 mobile_results/ JSON备份目录，启动时自动一次性迁入（幂等）
+      # 没有历史数据时保持注释即可
+      # - ./mobile_results:/app/mobile_results:ro
+      - app_logs:/app/logs
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+  app_logs:
+
+networks:
+  internal:
+    driver: bridge

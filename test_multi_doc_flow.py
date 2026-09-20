@@ -397,6 +397,27 @@ def test_instance_labels_are_stable_and_numbered():
 # ---------------------------------------------------------------- API 契约
 
 
+_contract_token = None
+
+
+def _contract_auth_header() -> str:
+    """契约测试用业务令牌（/verify 需登录；conftest清表后自动重建）。"""
+    global _contract_token
+    import auth_service
+    if _contract_token:
+        try:
+            auth_service.verify_token(_contract_token)
+            return f"Bearer {_contract_token}"
+        except auth_service.AuthError:
+            _contract_token = None
+    username = "api_contract_t"
+    if auth_service.get_user(username) is None:
+        auth_service.create_user(username, "Contract1", "business")
+    user = auth_service.authenticate(username, "Contract1")
+    _contract_token = auth_service.create_token(user)["access_token"]
+    return f"Bearer {_contract_token}"
+
+
 def _asgi_post(body: dict):
     import api
 
@@ -418,7 +439,9 @@ def _asgi_post(body: dict):
              "method": "POST", "scheme": "http", "path": "/verify",
              "raw_path": b"/verify", "query_string": b"",
              "headers": [(b"content-type", b"application/json"),
-                         (b"content-length", str(len(data)).encode())],
+                         (b"content-length", str(len(data)).encode()),
+                         (b"authorization",
+                          _contract_auth_header().encode("ascii"))],
              "client": ("127.0.0.1", 1), "server": ("test", 80), "root_path": ""}
 
     async def call():
