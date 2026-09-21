@@ -129,10 +129,14 @@ def test_business_missing_only_after_human_confirmation(ingest_result):
 
 
 def test_unlabeled_weight_sample_goes_needs_review():
-    """反例样本：栏位18重量未标口径 → needs_review（任务书A4）。"""
+    """反例样本：栏位18重量未标毛/净口径（任务书A4）——
+    首值按栏位口径暂记毛重（低置信+说明），净重候选转 needs_review 不静默判定。"""
     if not WEIGHT_SAMPLE.exists():
         pytest.skip("反例夹具未生成")
     r = pdf_ingest.process_pdf(WEIGHT_SAMPLE.read_bytes(), WEIGHT_SAMPLE.name)
     e = r.field_evidence["gross_weight_kg"]
-    assert e["status"] == "needs_review"
-    assert "net_weight_kg" not in r.field_evidence
+    assert e["status"] == "recognized" and e["confidence"] == 0.8
+    assert "毛/净" in e["note"]
+    net = r.field_evidence["net_weight_kg"]
+    assert net["status"] == "needs_review" and net["value"] is None
+    assert "3650.0" in net["raw_text"]

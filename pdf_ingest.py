@@ -255,22 +255,40 @@ TYPE_TITLES = {
 # ---------------------------------------------------------------- 主流程
 
 
+def mupdf_pages_text(data: bytes) -> dict:
+    """PyMuPDF 逐页文本。部分表单PDF的pdfplumber抽取会乱序/反向
+    （如"Накладная"→"яандалкаН"），判型需要一份干净的文本来源。"""
+    out = {}
+    try:
+        import pymupdf as fitz
+        doc = fitz.open(stream=data, filetype="pdf")
+        for i, page in enumerate(doc):
+            out[i + 1] = page.get_text()
+        doc.close()
+    except Exception:
+        pass
+    return out
+
+
 def detect_doc_type(filename: str, full_text: str) -> tuple[str, int]:
     """文件名+内容关键词打分，返回 (doc_type, score)。
     SMGS优先：СМГС/国际货协运单是比"运单"更强的版式信号（任务书A2类型先行），
-    命中即归入 smgs_rail_waybill，不再落入泛化运单。"""
-    upper = full_text.upper()
+    命中即归入 smgs_rail_waybill，不再落入泛化运单。
+    匹配空白不敏感：真实表单的表头CJK字距会被pdfplumber插入空格
+    （如"国际货协运单"→"国 际 货 协 运 单"），先去除全部空白再匹配。"""
+    squashed = "".join(full_text.split()).upper()
     for kw in DOC_TYPE_KEYWORDS["smgs_rail_waybill"]:
-        if kw.upper() in upper:
+        if "".join(kw.split()).upper() in squashed:
             return "smgs_rail_waybill", 6
     scores = {}
     fname = filename.upper()
+    upper = squashed          # 通用打分同样使用去空白文本（CJK字距鲁棒）
     for doc_type, keywords in DOC_TYPE_KEYWORDS.items():
         if doc_type == "smgs_rail_waybill":
             continue
         score = 0
         for kw in keywords:
-            if kw.upper() in upper:
+            if "".join(kw.split()).upper() in upper:
                 score += 2
             if kw.upper() in fname:
                 score += 1
@@ -434,7 +452,12 @@ def process_pdf(data: bytes, filename: str, max_pages: int = MAX_PDF_PAGES) -> I
         result.warnings = list(warnings)
         result.pages_with_ocr_failure = list(ocr_failed)
         page_texts = [p.text for p in pages]
-        result.doc_type, result.type_score = detect_doc_type(filename, "\n".join(page_texts))
+        detect_text = "\n".join(page_texts)
+        mupdf_texts = mupdf_pages_text(data)
+        if mupdf_texts:
+            # 判型合并PyMuPDF干净文本（SMGS等表单的pdfplumber抽取会乱序/反向）
+            detect_text += "\n" + "\n".join(mupdf_texts.values())
+        result.doc_type, result.type_score = detect_doc_type(filename, detect_text)
         ev_result = extract_fields_evidence(data, result.pages, result.doc_type)
         result.fields = ev_result.fields
         result.field_confidence = ev_result.field_confidence
@@ -557,7 +580,13 @@ def _build_group_result(filename: str, group_pages: list, ocr_failed: list,
     """把一组页面构建为独立的 IngestResult（类型识别+字段解析按组执行）。
     data 提供时启用版式感知抽取（栏位/坐标/证据），否则走旧正则路径。"""
     page_texts = [p.text for p in group_pages]
-    doc_type, type_score = detect_doc_type(filename, "\n".join(page_texts))
+    detect_text = "\n".join(page_texts)
+    if data:
+        mupdf_texts = mupdf_pages_text(data)
+        detect_text += "\n" + "\n".join(
+            t for n, t in sorted(mupdf_texts.items())
+            if n in {p.page_no for p in group_pages})
+    doc_type, type_score = detect_doc_type(filename, detect_text)
     ev_result = extract_fields_evidence(data, group_pages, doc_type)
     group_failed = [p.page_no for p in group_pages if p.page_no in ocr_failed]
     return IngestResult(

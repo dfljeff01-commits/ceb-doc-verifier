@@ -70,7 +70,7 @@ def test_continuation_lines_by_coordinates():
     value = _line("芜湖德菲图汽车技术有限公司", bbox=(36, 110, 240, 122))
     other_box = _line("大同 DATONG", bbox=(302, 110, 500, 122))
     units = _units([label, value, other_box])
-    conts = fe._continuation_lines(units, label)
+    conts = fe._box_lines(units, label)
     assert value in conts and other_box not in conts
 
 
@@ -88,15 +88,20 @@ def test_gross_labeled_weight_is_recognized():
 
 
 def test_unlabeled_weight_goes_to_needs_review():
-    """未标明毛/净口径的重量不得静默判定（任务书A3/A4：进待确认）。"""
+    """未标明毛/净口径的重量不得静默判定（任务书A3/A4）：
+    首值按栏位口径暂记毛重（低置信+说明），净重候选进 needs_review。"""
     units = _units([
         _line("18 Вес груза 重量: 5629.84 кг"),
+        _line("3650.0 кг"),
     ])
     fields, evidence, warnings = fe._smgs_extract(units)
     assert fields["gross_weight_kg"] == 5629.84
-    assert evidence["gross_weight_kg"]["status"] == "needs_review"
-    assert "毛重/净重" in evidence["gross_weight_kg"]["note"]
-    assert "net_weight_kg" not in fields
+    assert evidence["gross_weight_kg"]["status"] == "recognized"
+    assert evidence["gross_weight_kg"]["confidence"] == 0.8   # 低置信：口径未标注
+    assert "毛/净" in evidence["gross_weight_kg"]["note"]
+    assert evidence["net_weight_kg"]["status"] == "needs_review"
+    assert evidence["net_weight_kg"]["value"] is None         # 不静默填值
+    assert "3650.0" in evidence["net_weight_kg"]["raw_text"]
 
 
 # ---------------------------------------------------------------- 通用适配器

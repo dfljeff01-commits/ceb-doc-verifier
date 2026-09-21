@@ -147,9 +147,11 @@ def build_smgs(path: Path, weight_lines=None):
 
 
 def build_unlabeled_weight_variant(path: Path):
-    """反例：栏位18只有一个'Вес/重量'数值，未标注毛/净口径。
-    适配器必须把它放入 needs_review（按惯例暂记毛重+提示），不得静默判定。"""
-    build_smgs(path, weight_lines=["Вес груза 重量: 5629.84 кг"])
+    """反例：栏位18只有'Вес/重量'措辞、两个重量值均无毛/净口径标签。
+    适配器必须：第一个值按栏位口径暂记毛重（置信度0.8+说明），
+    净重进入 needs_review（不得静默判定）。"""
+    build_smgs(path, weight_lines=["Вес груза 重量: 5629.84 кг",
+                                   "3650.0 кг"])
 
 
 if __name__ == "__main__":

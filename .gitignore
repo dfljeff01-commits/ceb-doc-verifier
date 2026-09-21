@@ -30,3 +30,6 @@ _tools/
 
 # 运行时数据目录（v1 JSON备份/迁移数据，不入库；迁移验证见 test_migration.py）
 mobile_results/
+
+# 真实单据受控副本（含客户敏感信息，绝不入库；回归测试本地运行）
+sample_pdfs/_real/
