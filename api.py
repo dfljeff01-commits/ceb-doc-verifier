@@ -169,11 +169,13 @@ async def _run_ingest(fn, data: bytes, filename: str):
 
 
 class DocumentIn(BaseModel):
-    """单证对象契约：doc_type 必须是受支持口径内的字符串，fields 必须是对象。"""
+    """单证对象契约：doc_type 必须是受支持口径内的字符串，fields 必须是对象。
+    field_meta（可选，P0任务书A1）为字段四状态证据，随单据进入存储与展示。"""
     doc_type: str = "unknown"
     doc_id: str = ""
     title: str = ""
     fields: dict[str, Any] = Field(default_factory=dict)
+    field_meta: dict[str, Any] | None = None
 
     @field_validator("doc_type")
     @classmethod

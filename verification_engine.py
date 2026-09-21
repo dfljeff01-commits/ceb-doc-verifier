@@ -56,6 +56,7 @@ REQUIRED_DOC_NAMES = {
     "invoice": "商业发票（Commercial Invoice）",
     "packing_list": "装箱单（Packing List）",
     "railway_waybill": "国际铁路运单（Railway Consignment Note）",
+    "smgs_rail_waybill": "国际货协运单（СМГС SMGS Rail Waybill）",
     "export_customs_declaration": "出口报关单（Export Customs Declaration）",
     "certificate_of_origin": "原产地证书（Certificate of Origin）",
 }
@@ -67,6 +68,7 @@ DOC_TYPE_SHORT = {
     "invoice": "发票",
     "packing_list": "装箱单",
     "railway_waybill": "运单",
+    "smgs_rail_waybill": "运单",
     "export_customs_declaration": "报关单",
     "certificate_of_origin": "产地证",
     "unknown": "单据",
@@ -198,6 +200,9 @@ def check_input_structure(raw_documents) -> dict:
 
 def check_completeness(documents: list) -> dict:
     present = {doc.get("doc_type") for doc in documents}
+    # SMGS运单是铁路运单的一种版式：任一运单类型即满足"铁路运单"席位（任务书A2）
+    if present & set(doc_contract.RAIL_WAYBILL_TYPES):
+        present.add("railway_waybill")
     missing = [t for t in REQUIRED_DOC_TYPES if t not in present]
     if missing:
         names = "、".join(REQUIRED_DOC_NAMES[t] for t in missing)
@@ -236,7 +241,18 @@ def check_field_completeness(documents: list) -> dict:
         id_field = doc_contract.IDENTITY_FIELDS.get(dtype)
         if id_field and _field(doc, id_field) is None:
             label = doc_contract.FIELD_LABELS_ZH.get(id_field, id_field)
-            problems.append((STATUS_WARNING, name, f"缺少单证编号（{label}），需人工补齐", doc_id))
+            status_id = doc_contract.field_status(doc, id_field)
+            if status_id == doc_contract.FIELD_BUSINESS_MISSING:
+                problems.append((STATUS_FAIL, name,
+                                 f"已人工确认缺失单证编号（{label}）", doc_id))
+            elif status_id == doc_contract.FIELD_NEEDS_REVIEW:
+                problems.append((STATUS_WARNING, name,
+                                 f"单证编号（{label}）识别置信度低，待人工确认", doc_id))
+            else:
+                # not_found：未找到候选 ≠ 业务缺失（P0任务书A1），措辞中性
+                problems.append((STATUS_WARNING, name,
+                                 f"未提取到单证编号（{label}）——可能是未识别到，"
+                                 f"请补录或人工确认", doc_id))
     if problems:
         involved = [p[3] for p in problems if p[3]]
         worst = STATUS_FAIL if any(p[0] == STATUS_FAIL for p in problems) else STATUS_WARNING
@@ -665,7 +681,8 @@ def check_consignee(documents: list) -> dict:
 
 def check_waybill_no_crossref(documents: list) -> dict:
     """报关单『运单号』应与铁路运单号一致（交叉引用，覆盖每一份报关单——修复 F02）。"""
-    waybills = [d for d in documents if d.get("doc_type") == "railway_waybill"]
+    waybills = [d for d in documents
+                if d.get("doc_type") in doc_contract.RAIL_WAYBILL_TYPES]
     customs = [d for d in documents if d.get("doc_type") == "export_customs_declaration"]
     if not waybills or not customs:
         return _make_result(
@@ -821,7 +838,8 @@ def check_waybill_type_route(documents: list) -> list:
     - 覆盖集合按运单类型取对应集合，统一运单取 SMGS∪CIM 并集；
     - 并集之外的途经国家（如美国）判 FAIL，类型自身集合外国家判 WARNING；
     - 每条结果附带规则版本与覆盖范围说明。"""
-    waybills = [d for d in documents if d.get("doc_type") == "railway_waybill"]
+    waybills = [d for d in documents
+                if d.get("doc_type") in doc_contract.RAIL_WAYBILL_TYPES]
     if not waybills:
         return [_make_result(
             "ROUTE-001", "路线合规性", "运单类型与线路匹配", STATUS_WARNING,
@@ -838,6 +856,9 @@ def check_waybill_type_route(documents: list) -> list:
 def _check_single_waybill_route(wb: dict, label: str) -> dict:
     wb_type = _norm_text(_field(wb, "waybill_type") or "")
     route = _field(wb, "route_countries") or []
+    if wb.get("doc_type") == "smgs_rail_waybill" and not wb_type:
+        # СМГС版式单据的运单类型自明（任务书A3）：不再要求人工补填类型栏
+        wb_type = "SMGS国际货协运单"
     if not wb_type or not route:
         return _make_result(
             "ROUTE-001", "路线合规性", f"运单类型与线路匹配（{label}）", STATUS_WARNING,
@@ -908,7 +929,8 @@ def _check_single_waybill_route(wb: dict, label: str) -> dict:
 def check_route_ends(documents: list) -> dict:
     """报关起运/目的国与运单路线端点核对（覆盖每一份报关单；附带规则元信息）。
     多运单批次下以第一份载有路线信息的运单为基准（同批多车厢运单路线一致）。"""
-    waybills = [d for d in documents if d.get("doc_type") == "railway_waybill"]
+    waybills = [d for d in documents
+                if d.get("doc_type") in doc_contract.RAIL_WAYBILL_TYPES]
     customs = [d for d in documents if d.get("doc_type") == "export_customs_declaration"]
     if not waybills or not customs:
         return _make_result(

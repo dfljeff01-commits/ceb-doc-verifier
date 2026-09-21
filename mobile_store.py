@@ -192,13 +192,13 @@ def save_batch(documents: list, verification: dict, source: str = "mobile_app",
                 status = "FAIL" if fail_n else ("WARNING" if warn_n else "PASS")
                 cur.execute(
                     """INSERT INTO documents (batch_id, doc_index, doc_type, doc_id,
-                                              title, fields, status)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                                              title, fields, status, field_meta)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (record["batch_id"], idx,
                      str(doc.get("doc_type") or "unknown"),
                      str(doc.get("doc_id") or f"{record['batch_id']}-{idx}"),
                      str(doc.get("title") or ""), db.jsonb(doc.get("fields") or {}),
-                     status))
+                     status, db.jsonb(doc.get("field_meta"))))
             cur.execute("DELETE FROM verification_issues WHERE batch_id = %s",
                         (record["batch_id"],))
             rule_version = str(verification.get("rule_version") or "")
@@ -287,10 +287,15 @@ def get_batch(batch_id: str) -> dict | None:
         return None
     row = rows[0]
     doc_rows = db.query(
-        "SELECT doc_index, doc_type, doc_id, title, fields FROM documents"
+        "SELECT doc_index, doc_type, doc_id, title, fields, field_meta FROM documents"
         " WHERE batch_id = %s ORDER BY doc_index", (batch_id,))
-    documents = [{"doc_type": r["doc_type"], "doc_id": r["doc_id"],
-                  "title": r["title"], "fields": r["fields"]} for r in doc_rows]
+    documents = []
+    for r in doc_rows:
+        d = {"doc_type": r["doc_type"], "doc_id": r["doc_id"],
+             "title": r["title"], "fields": r["fields"]}
+        if r.get("field_meta"):
+            d["field_meta"] = r["field_meta"]
+        documents.append(d)
     record = {
         "batch_id": row["batch_id"],
         "batch_name": row.get("batch_name") or "",

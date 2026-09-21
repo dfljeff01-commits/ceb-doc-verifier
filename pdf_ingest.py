@@ -102,11 +102,12 @@ class PageResult:
 @dataclass
 class IngestResult:
     filename: str
-    doc_type: str = "unknown"       # invoice / packing_list / railway_waybill / export_customs_declaration / unknown
+    doc_type: str = "unknown"       # invoice / packing_list / railway_waybill / smgs_rail_waybill / export_customs_declaration / unknown
     type_score: int = 0
     pages: list = dc_field(default_factory=list)
     fields: dict = dc_field(default_factory=dict)
     field_confidence: dict = dc_field(default_factory=dict)   # field -> high/review/missing
+    field_evidence: dict = dc_field(default_factory=dict)     # field -> 四状态证据（P0任务书A1）
     elapsed_seconds: float = 0.0
     error: str | None = None
     warnings: list = dc_field(default_factory=list)
@@ -116,7 +117,9 @@ class IngestResult:
 
     @property
     def needs_review(self) -> bool:
-        """需人工复核：类型未识别 / 任一页OCR失败 / 任一字段提取失败或存疑。"""
+        """需人工复核：类型未识别 / 任一页OCR失败 / 任一字段待确认或未找到。
+        注意（P0任务书A1）：not_found 只是"未找到候选值"，不是业务缺失——
+        需要人工处理，但不等于单据不合格。"""
         return (self.doc_type == "unknown"
                 or bool(self.pages_with_ocr_failure)
                 or any(v in ("missing", "review") for v in self.field_confidence.values()))
@@ -128,16 +131,21 @@ class IngestResult:
         titles = {"invoice": "商业发票 Commercial Invoice",
                   "packing_list": "装箱单 Packing List",
                   "railway_waybill": "国际铁路运单 Railway Consignment Note",
+                  "smgs_rail_waybill": "国际货协运单（СМГС）SMGS Rail Waybill",
                   "export_customs_declaration": "出口报关单 Export Customs Declaration"}
         stem = Path(self.filename).stem[:24]
         doc_id = f"PDF-{stem}" + (f"-{doc_id_suffix}" if doc_id_suffix else "")
         title = titles.get(self.doc_type, f"未识别单证 {self.filename}（需人工指定类型）")
-        return {
+        doc = {
             "doc_type": self.doc_type,
             "doc_id": doc_id,
             "title": title,
             "fields": self.fields,
         }
+        if self.field_evidence:
+            # 四状态证据随单据走（页面/规则/报告按证据区分识别与业务口径）
+            doc["field_meta"] = self.field_evidence
+        return doc
 
 
 # 字段解析规则：字段名 -> 正则列表（忽略大小写）。
@@ -226,6 +234,8 @@ DOC_TYPE_KEYWORDS = {
     "invoice": ["COMMERCIAL INVOICE", "INVOICE NO", "发票"],
     "packing_list": ["PACKING LIST", "装箱单"],
     "railway_waybill": ["CONSIGNMENT NOTE", "WAYBILL", "运单", "RAILWAY"],
+    "smgs_rail_waybill": ["НАКЛАДНАЯ СМГС", "SMGS NAKLADNAYA", "СМГС NAKLADNAJA",
+                           "国际货协运单", "货协运单"],
     "export_customs_declaration": ["报关单", "DECLARATION NO", "海关出口"],
     "certificate_of_origin": ["CERTIFICATE OF ORIGIN", "原产地", "CCPIT"],
 }
@@ -246,13 +256,21 @@ TYPE_TITLES = {
 
 
 def detect_doc_type(filename: str, full_text: str) -> tuple[str, int]:
-    """文件名+内容关键词打分，返回 (doc_type, score)。"""
+    """文件名+内容关键词打分，返回 (doc_type, score)。
+    SMGS优先：СМГС/国际货协运单是比"运单"更强的版式信号（任务书A2类型先行），
+    命中即归入 smgs_rail_waybill，不再落入泛化运单。"""
+    upper = full_text.upper()
+    for kw in DOC_TYPE_KEYWORDS["smgs_rail_waybill"]:
+        if kw.upper() in upper:
+            return "smgs_rail_waybill", 6
     scores = {}
     fname = filename.upper()
     for doc_type, keywords in DOC_TYPE_KEYWORDS.items():
+        if doc_type == "smgs_rail_waybill":
+            continue
         score = 0
         for kw in keywords:
-            if kw.upper() in full_text.upper():
+            if kw.upper() in upper:
                 score += 2
             if kw.upper() in fname:
                 score += 1
@@ -314,6 +332,31 @@ def _finalize_field(field: str, raw: str) -> tuple[object, str, str | None]:
             return (parts or value), "high", None
         return value, "high", None
     return value, "high", None
+
+
+def extract_fields_evidence(data: bytes | None, pages: list, doc_type: str) -> IngestResult:
+    """版式感知抽取（P0任务书A1/A3/A5）：栏位号/坐标/多语言标签候选 + 证据，
+    未命中字段回落到旧正则规则。data 为空（重分组等无原始字节场景）时直接
+    走旧正则路径（行为与v1.x一致）。"""
+    result = IngestResult(filename="")
+    result.doc_type = doc_type
+    if data:
+        try:
+            import field_extraction
+            units = field_extraction.build_page_units(data, pages)
+            outcome = field_extraction.extract_document_fields(
+                doc_type, units, legacy_fallback=extract_fields)
+            result.fields = outcome.fields
+            result.field_confidence = outcome.confidence
+            result.field_evidence = outcome.evidence
+            result.warnings = list(outcome.warnings)
+            return result
+        except Exception as exc:
+            # 版式层异常不阻断摄取：退回旧正则路径并留警告
+            result.warnings.append(f"版式感知抽取异常（{type(exc).__name__}: {exc}），已回退通用规则")
+    fields, confidence, warnings = extract_fields(doc_type, [p.text for p in pages])
+    result.fields, result.field_confidence, result.warnings = fields, confidence, warnings
+    return result
 
 
 def extract_fields(doc_type: str, page_texts: list) -> tuple[dict, dict, list]:
@@ -392,9 +435,11 @@ def process_pdf(data: bytes, filename: str, max_pages: int = MAX_PDF_PAGES) -> I
         result.pages_with_ocr_failure = list(ocr_failed)
         page_texts = [p.text for p in pages]
         result.doc_type, result.type_score = detect_doc_type(filename, "\n".join(page_texts))
-        result.fields, result.field_confidence, extract_warnings = extract_fields(
-            result.doc_type, page_texts)
-        result.warnings.extend(extract_warnings)
+        ev_result = extract_fields_evidence(data, result.pages, result.doc_type)
+        result.fields = ev_result.fields
+        result.field_confidence = ev_result.field_confidence
+        result.field_evidence = ev_result.field_evidence
+        result.warnings.extend(ev_result.warnings)
     except Exception as exc:  # 单文件失败不影响其他文件
         result.error = f"{type(exc).__name__}: {exc}"
     result.elapsed_seconds = time.perf_counter() - t0
@@ -507,27 +552,31 @@ def detect_doc_groups(pages: list) -> tuple[list, bool, str]:
     return groups, needs, reason
 
 
-def _build_group_result(filename: str, group_pages: list, ocr_failed: list) -> IngestResult:
-    """把一组页面构建为独立的 IngestResult（类型识别+字段解析按组执行）。"""
+def _build_group_result(filename: str, group_pages: list, ocr_failed: list,
+                        data: bytes | None = None) -> IngestResult:
+    """把一组页面构建为独立的 IngestResult（类型识别+字段解析按组执行）。
+    data 提供时启用版式感知抽取（栏位/坐标/证据），否则走旧正则路径。"""
     page_texts = [p.text for p in group_pages]
     doc_type, type_score = detect_doc_type(filename, "\n".join(page_texts))
-    fields, confidence, warnings = extract_fields(doc_type, page_texts)
+    ev_result = extract_fields_evidence(data, group_pages, doc_type)
     group_failed = [p.page_no for p in group_pages if p.page_no in ocr_failed]
     return IngestResult(
         filename=filename,
         doc_type=doc_type,
         type_score=type_score,
         pages=list(group_pages),
-        fields=fields,
-        field_confidence=confidence,
-        warnings=list(warnings),
+        fields=ev_result.fields,
+        field_confidence=ev_result.field_confidence,
+        field_evidence=ev_result.field_evidence,
+        warnings=list(ev_result.warnings),
         pages_with_ocr_failure=group_failed,
         identity_value=detect_page_identity("\n".join(page_texts), doc_type),
     )
 
 
 def rebuild_groups(filename: str, pages: list, assignment: list,
-                   ocr_failed: list, group_types: list | None = None) -> list:
+                   ocr_failed: list, group_types: list | None = None,
+                   data: bytes | None = None) -> list:
     """按"页 -> 组"归属关系重建各组摄取结果（用户在界面调整边界/纠正类型后调用）。
     assignment 为与 pages 等长的组序号列表（0基）。group_types 提供时作为各组类型
     （人工纠正），否则按组内文本自动识别。"""
@@ -539,13 +588,15 @@ def rebuild_groups(filename: str, pages: list, assignment: list,
     for group_pages in buckets:
         if not group_pages:
             continue
-        r = _build_group_result(filename, group_pages, set(ocr_failed))
+        r = _build_group_result(filename, group_pages, set(ocr_failed), data=data)
         if group_types:
             forced = group_types[len(results)] if len(results) < len(group_types) else None
             if forced and forced != r.doc_type and forced != "keep":
-                texts = [p.text for p in group_pages]
-                r.fields, r.field_confidence, extra_warn = extract_fields(forced, texts)
-                r.warnings.extend(extra_warn)
+                forced_result = extract_fields_evidence(data, group_pages, forced)
+                r.fields = forced_result.fields
+                r.field_confidence = forced_result.field_confidence
+                r.field_evidence = forced_result.field_evidence
+                r.warnings.extend(forced_result.warnings)
                 r.doc_type = forced
         results.append(r)
     return results
@@ -577,7 +628,7 @@ def split_pdf(data: bytes, filename: str, max_pages: int = MAX_PDF_PAGES) -> Spl
         group_failed = set(ocr_failed)
         for g_idx, g in enumerate(groups):
             group_pages = [pages[n - 1] for n in g.page_nos]
-            r = _build_group_result(filename, group_pages, group_failed)
+            r = _build_group_result(filename, group_pages, group_failed, data=data)
             r.identity_value = g.identity_value or r.identity_value
             # 页级警告（OCR失败）归属到对应组
             r.warnings.extend(w for w in page_warnings
@@ -623,9 +674,11 @@ def process_image(data: bytes, filename: str) -> IngestResult:
             result.pages.append(PageResult(1, "ocr", len(re.sub(r"\s", "", text)),
                                            seconds, text))
             result.doc_type, result.type_score = detect_doc_type(filename, text)
-            result.fields, result.field_confidence, extract_warnings = extract_fields(
-                result.doc_type, [text])
-            result.warnings.extend(extract_warnings)
+            ev_result = extract_fields_evidence(None, result.pages, result.doc_type)
+            result.fields = ev_result.fields
+            result.field_confidence = ev_result.field_confidence
+            result.field_evidence = ev_result.field_evidence
+            result.warnings.extend(ev_result.warnings)
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
     result.elapsed_seconds = time.perf_counter() - t0

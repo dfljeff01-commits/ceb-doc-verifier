@@ -155,7 +155,13 @@ def check_document(doc: dict) -> dict:
         value = fields.get(field)
         violated = False
         if rule["rule_type"] == "required":
-            violated = _field_missing(value)
+            if _field_missing(value) and doc_contract.has_field_meta(doc):
+                # 四状态口径（P0任务书A1）：带识别证据的单据，仅"业务确认缺失"
+                # 触发规则；not_found/needs_review 是识别状态，不能等同业务缺失
+                status = doc_contract.field_status(doc, field)
+                violated = status == "business_missing"
+            else:
+                violated = _field_missing(value)
         elif rule["rule_type"] == "format":
             if not _field_missing(value):
                 violated = re.fullmatch(str(rule["pattern"]), str(value).strip()) is None

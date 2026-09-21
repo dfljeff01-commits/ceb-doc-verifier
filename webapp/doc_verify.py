@@ -845,6 +845,44 @@ def _persist_web_batch(batch: dict, verification: dict) -> None:
         st.warning(f"批次入库失败（本次查看不受影响，请检查数据库连接）：{exc}")
 
 
+def render_recognition_summary(batch: dict, documents: list) -> None:
+    """识别状态摘要（P1任务书B2-2/B2-4）：与核验结论分离呈现。
+    让用户先看到"系统识别得怎么样、哪些待我处理"，而不是把未识别字段当成业务缺失。"""
+    totals = {doc_contract.FIELD_RECOGNIZED: 0, doc_contract.FIELD_NEEDS_REVIEW: 0,
+              doc_contract.FIELD_NOT_FOUND: 0, doc_contract.FIELD_BUSINESS_MISSING: 0,
+              doc_contract.FIELD_NOT_APPLICABLE: 0}
+    open_items = []          # (单据标题, 字段中文名, 状态)
+    for i, doc in enumerate(documents, start=1):
+        summary = doc_contract.summarize_field_status(doc)
+        for k, n in summary["counts"].items():
+            totals[k] = totals.get(k, 0) + n
+        title = _doc_title(doc) or f"单据#{i}"
+        for field in summary["open_fields"]:
+            open_items.append((title, doc_contract.FIELD_LABELS_ZH.get(field, field),
+                               doc_contract.field_status(doc, field)))
+    st.markdown("###### 🔎 识别状态（系统是否找到字段）")
+    st.markdown(
+        f'<div style="background:#F9FAFB;border:1px solid #E5E7EB;border-radius:12px;'
+        f'padding:10px 16px;font-size:13.5px;line-height:1.9;">'
+        f'✅ 已识别 <b style="color:#1B5E20;">{totals[doc_contract.FIELD_RECOGNIZED]}</b>　'
+        f'⚠️ 待人工确认 <b style="color:#8D6E00;">{totals[doc_contract.FIELD_NEEDS_REVIEW]}</b>　'
+        f'❔ 未找到候选 <b style="color:#5B6470;">{totals[doc_contract.FIELD_NOT_FOUND]}</b>　'
+        f'⛔ 业务确认缺失 <b style="color:#B71C1C;">{totals[doc_contract.FIELD_BUSINESS_MISSING]}</b>　'
+        f'➖ 不适用 {totals[doc_contract.FIELD_NOT_APPLICABLE]}</div>', unsafe_allow_html=True)
+    if totals[doc_contract.FIELD_NOT_FOUND]:
+        st.caption("❔“未找到”是系统没有识别到，不等于单据业务缺失；"
+                   "可在字段编辑区补录，或人工确认。")
+    if open_items:
+        with st.expander(f"待处理字段清单（{len(open_items)} 项）"):
+            for doc_title, field_zh, status in open_items[:30]:
+                icon = "⚠️" if status == doc_contract.FIELD_NEEDS_REVIEW else (
+                    "⛔" if status == doc_contract.FIELD_BUSINESS_MISSING else "❔")
+                st.markdown(f"{icon} **{doc_title}** · {field_zh}"
+                            f"（{doc_contract.FIELD_STATUS_LABELS.get(status, status)}）")
+    st.caption("👇 下方为**核验状态**（字段之间是否矛盾、是否满足业务规则）——"
+               "识别状态与核验状态是两件事。")
+
+
 def render_recent_batches() -> None:
     """库内近期批次一览（PostgreSQL）：网页向导批次与App批次同库可见，
     在"手机拍摄批次"模式输入编号即可查看完整报告。"""
@@ -1047,6 +1085,9 @@ def render() -> None:
         f"FastAPI 服务（{API_URL}）—— 前后端分离形态" if verify_mode == "api"
         else "手机批次（读取API服务端持久化的完整核验报告）" if verify_mode == "api-store"
         else "进程内直连（未检测到核验API服务，启动 `uvicorn api:app --port 8000` 可切换为API形态"))
+
+    # 识别状态摘要（与核验结论分离，P1任务书B2-4）
+    render_recognition_summary(batch, edited_documents)
 
     # 核验结果汇总（P0：环形风险仪表为全页视觉焦点；导出按钮放标题行右侧）
     head_left, head_right = st.columns([4, 1])

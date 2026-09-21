@@ -30,6 +30,7 @@ COMPOSITION_ORDER = [
     "invoice",
     "packing_list",
     "railway_waybill",
+    "smgs_rail_waybill",
     "export_customs_declaration",
     "certificate_of_origin",
 ]
@@ -38,11 +39,13 @@ COMPOSITION_LABELS = {
     "invoice": "商业发票",
     "packing_list": "装箱单",
     "railway_waybill": "国际铁路运单",
+    "smgs_rail_waybill": "国际货协运单（СМГС）",
     "export_customs_declaration": "出口报关单",
     "certificate_of_origin": "原产地证书",
 }
 
 SHORT_LABELS = {"invoice": "发票", "packing_list": "装箱单", "railway_waybill": "运单",
+                "smgs_rail_waybill": "运单",
                 "export_customs_declaration": "报关单", "certificate_of_origin": "产地证"}
 
 MAX_INSTANCES = 12     # 单个类型最多声明/拆分数（防呆上限）
@@ -64,9 +67,10 @@ def _wkey(key: str, default=None):
 
 
 def reset_wizard() -> None:
-    """清空向导状态（重置时用）。"""
+    """清空向导状态（重置时用），含字段人工决策（wiz_fm）。"""
     for key in list(st.session_state.keys()):
-        if key.startswith(("wiz_", "fld::pdf_wiz_")):
+        if key.startswith(("wiz_", "fld::pdf_wiz_", "wiz_fm::",
+                           "edit_toggle::", "edit_val::", "edit_reason::")):
             del st.session_state[key]
 
 
@@ -346,10 +350,292 @@ def _collect_wizard_documents() -> list:
     return docs
 
 
+# -*- coding: utf-8 -*-
+"""新版向导第3步（四状态UI）内容，供拼接脚本使用。"""
+
+# ============================================================
+# 第3步：逐份核对（字段四状态口径，P0任务书A1/P1任务书B2）
+# ============================================================
+
+# 用户字段决策状态键：wiz_fm::{doc_key}::{field} -> 决策dict
+# 已确认单据标志：wiz_ok::{doc_key}（与第2步的旧键共用命名，含义不变）
+_FM_PREFIX = "wiz_fm::"
+
+
+# 状态 → (前景色, 背景色, 图标)；not_found 是灰色不是红色（P0任务书A1）
+_FIELD_VISUAL = {
+    doc_contract.FIELD_RECOGNIZED: ("#1B5E20", "#E8F5E9", "✅"),
+    doc_contract.FIELD_NEEDS_REVIEW: ("#8D6E00", "#FFF8E1", "⚠️"),
+    doc_contract.FIELD_NOT_FOUND: ("#5B6470", "#F1F3F5", "❔"),
+    doc_contract.FIELD_BUSINESS_MISSING: ("#B71C1C", "#FFEBEE", "⛔"),
+    doc_contract.FIELD_NOT_APPLICABLE: ("#6B7280", "#F1F3F5", "➖"),
+}
+
+
+def _decision_key(doc_key: str, field: str) -> str:
+    return f"{_FM_PREFIX}{doc_key}::{field}"
+
+
+def _get_decision(doc_key: str, field: str) -> dict | None:
+    return st.session_state.get(_decision_key(doc_key, field))
+
+
+def _save_decision(doc_key: str, field: str, status: str, value=None,
+                   raw_text: str = "", reason: str = "", page=None,
+                   region: str = "—") -> None:
+    """落定一个人工字段决策：写会话状态 + 操作留痕（EDIT_FIELD）。
+    含原值/新值/修改人/修改时间/原因/是否人工确认（任务书A1）。"""
+    import datetime as _dt
+    key = _decision_key(doc_key, field)
+    prev = st.session_state.get(key)
+    decision = {
+        "status": status, "value": value, "raw_text": raw_text,
+        "reason": reason, "page": page, "region": region,
+        "user": st.session_state.get("ceb_user", {}).get("username", "—"),
+        "ts": _dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    st.session_state[key] = decision
+    try:
+        import audit
+        from webapp import session as web_session
+        audit.record(
+            web_session.current_username(), audit.EDIT_FIELD, "field",
+            f"{doc_key}/{field}",
+            before=None if prev is None else {"status": prev.get("status"),
+                                              "value": prev.get("value")},
+            after={"status": status, "value": value, "reason": reason,
+                   "human_confirmed": True})
+    except Exception as exc:  # 审计存储不可用不阻断确认流程
+        st.caption(f"⚠️ 本次确认留痕失败：{exc}")
+
+
+def _apply_decisions(item: dict) -> dict:
+    """把该单据的全部人工决策合并进 doc 的 fields + field_meta（提交核验前调用）。"""
+    doc, doc_key = item["doc"], item["doc_key"]
+    prefix = f"{_FM_PREFIX}{doc_key}::"
+    decisions = {}
+    for key in list(st.session_state.keys()):
+        if key.startswith(prefix):
+            decisions[key[len(prefix):]] = st.session_state[key]
+    if not decisions:
+        return doc
+    fields = dict(doc.get("fields") or {})
+    meta = dict(doc.get("field_meta") or {})
+    for field, d in decisions.items():
+        status, value = d["status"], d.get("value")
+        if status in (doc_contract.FIELD_RECOGNIZED,
+                      doc_contract.FIELD_NEEDS_REVIEW):
+            if value not in (None, ""):
+                fields[field] = value
+        elif status in (doc_contract.FIELD_BUSINESS_MISSING,
+                        doc_contract.FIELD_NOT_APPLICABLE):
+            fields.pop(field, None)
+        meta[field] = {
+            "status": status, "value": value,
+            "raw_text": d.get("raw_text", ""),
+            "method": "人工确认", "confidence": 1.0,
+            "note": d.get("reason", ""),
+            "page": d.get("page"), "region": d.get("region", "—"),
+            "confirmed_by": d.get("user"), "confirmed_at": d.get("ts"),
+        }
+    doc["fields"] = fields
+    doc["field_meta"] = meta
+    return doc
+
+
+def _zh(field: str) -> str:
+    return doc_contract.FIELD_LABELS_ZH.get(field, field)
+
+
+def _status_badge(status: str) -> str:
+    fg, bg, icon = _FIELD_VISUAL.get(status, ("#6B7280", "#F1F3F5", "•"))
+    label = doc_contract.FIELD_STATUS_LABELS.get(status, status)
+    return (f'<span style="color:{fg};background:{bg};border-radius:999px;'
+            f'padding:2px 10px;font-size:12px;font-weight:700;">{icon} {label}</span>')
+
+
+def _effective_status(item: dict, field: str) -> tuple:
+    """字段当前生效状态：人工决策优先，其次识别证据。
+    返回 (status, evidence/decision dict)。"""
+    decision = _get_decision(item["doc_key"], field)
+    if decision is not None:
+        return decision["status"], decision
+    doc = item["doc"]
+    meta = doc.get("field_meta") or {}
+    if field in meta:
+        return meta[field].get("status", doc_contract.FIELD_NOT_FOUND), meta[field]
+    fields = doc.get("fields") or {}
+    return (doc_contract.FIELD_RECOGNIZED if fields.get(field) not in (None, "", [])
+            else doc_contract.FIELD_NOT_FOUND), meta.get(field, {})
+
+
+def _relevant_fields(item: dict) -> tuple:
+    """该单据需要展示的字段：必填 ∪ 识别证据字段（排除"不适用"类型字段）。
+    返回 (字段列表, 不适用字段列表)。"""
+    doc = item["doc"]
+    dtype = doc.get("doc_type") or "unknown"
+    na = set(doc_contract.NOT_APPLICABLE_FIELDS.get(dtype, []))
+    relevant = (set(doc_contract.REQUIRED_FIELDS.get(dtype, []))
+                | set((doc.get("field_meta") or {}).keys())
+                | set((doc.get("fields") or {}).keys())) - na
+    return sorted(relevant), sorted(na)
+
+
+def _render_field_row(item: dict, field: str, required: bool) -> None:
+    """逐字段行：状态/值 + 证据（原文/页码/栏位/方法/置信度）+ 操作按钮。
+    默认折叠识别证据，仅待处理字段展开操作区（P1：减少噪音）。"""
+    doc_key = item["doc_key"]
+    status, source = _effective_status(item, field)
+    decision = _get_decision(doc_key, field)
+    is_open = status in (doc_contract.FIELD_NEEDS_REVIEW,
+                         doc_contract.FIELD_NOT_FOUND)
+    value = (decision or source).get("value") if (decision or source) else None
+    raw = (decision or source).get("raw_text", "") if (decision or source) else ""
+    page = (decision or source).get("page") if (decision or source) else None
+    region = (decision or source).get("region", "—") if (decision or source) else "—"
+    method = (decision or source).get("method", "") if (decision or source) else ""
+    conf = (decision or source).get("confidence") if (decision or source) else None
+    note = (decision or source).get("note") or (decision or source).get("reason", "") \
+        if (decision or source) else ""
+
+    head_cols = st.columns([3, 2, 2])
+    with head_cols[0]:
+        st.markdown(f"**{_zh(field)}**")
+    with head_cols[1]:
+        st.markdown(_status_badge(status), unsafe_allow_html=True)
+    with head_cols[2]:
+        st.caption(f"值：{value if value not in (None, '') else '—'}")
+
+    # 证据（展开器：默认收起，待处理字段展开）
+    with st.expander("识别证据与操作", expanded=is_open):
+        st.caption(
+            f"原始候选：{raw or '—'}　|　来源：{region}"
+            f"{' 第' + str(page) + '页' if page else ''}　|　"
+            f"方式：{method or '—'}　|　置信度：{conf if conf is not None else '—'}")
+        if note:
+            st.caption(f"说明：{note}")
+        if decision is not None:
+            st.caption(f"已由 {decision.get('user')} 于 {decision.get('ts')} 确认；"
+                       "重新提取不会覆盖本字段（如需覆盖请在下方显式操作）。")
+
+        # ---- 操作区 ----
+        edit_toggle = st.toggle("✏️ 修改/补录", key=f"edit_t::{doc_key}::{field}")
+        if edit_toggle:
+            new_text = st.text_input(
+                "新值", value="" if value is None else str(value),
+                key=f"edit_val::{doc_key}::{field}")
+            reason = st.text_input("修改原因", key=f"edit_reason::{doc_key}::{field}")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("✔ 确认新值（标记已识别）",
+                             key=f"save_v::{doc_key}::{field}"):
+                    parsed = new_text
+                    if field in doc_contract.NUMERIC_FIELDS:
+                        parsed = __import__("field_extraction").parse_num(new_text)
+                        if parsed is None:
+                            st.error("无法解析为数值，请核对输入")
+                            return
+                    _save_decision(
+                        doc_key, field, doc_contract.FIELD_RECOGNIZED,
+                        value=parsed, raw_text=raw or new_text,
+                        reason=reason, page=page, region=region)
+                    st.rerun()
+            with c2:
+                if st.button("✔ 保存但仍需他人复核",
+                             key=f"save_r::{doc_key}::{field}"):
+                    _save_decision(
+                        doc_key, field, doc_contract.FIELD_NEEDS_REVIEW,
+                        value=new_text, raw_text=raw or new_text,
+                        reason=reason, page=page, region=region)
+                    st.rerun()
+
+        btn_cols = st.columns(3 if required else 2)
+        with btn_cols[0]:
+            if status != doc_contract.FIELD_RECOGNIZED and st.button(
+                    "✅ 识别无误，确认", key=f"ok::{doc_key}::{field}"):
+                _save_decision(
+                    doc_key, field, doc_contract.FIELD_RECOGNIZED,
+                    value=value, raw_text=raw, reason="人工确认识别值",
+                    page=page, region=region)
+                st.rerun()
+        with btn_cols[1]:
+            if status != doc_contract.FIELD_NOT_APPLICABLE and st.button(
+                    "➖ 标记不适用/未要求", key=f"na::{doc_key}::{field}"):
+                _save_decision(
+                    doc_key, field, doc_contract.FIELD_NOT_APPLICABLE,
+                    value=None, raw_text=raw, reason="该字段对此单据不适用",
+                    page=page, region=region)
+                st.rerun()
+        if required:
+            with btn_cols[2]:
+                if status != doc_contract.FIELD_BUSINESS_MISSING and st.button(
+                        "⛔ 确认业务缺失", key=f"bm::{doc_key}::{field}"):
+                    _save_decision(
+                        doc_key, field, doc_contract.FIELD_BUSINESS_MISSING,
+                        value=None, raw_text=raw,
+                        reason="人工确认：单据确无此字段", page=page, region=region)
+                    st.rerun()
+
+
+def _render_document(item: dict) -> tuple:
+    """渲染一份单据的摘要卡 + 字段区，返回 (待处理数, 是否确认)。"""
+    doc = item["doc"]
+    dtype = doc.get("doc_type") or "unknown"
+    fields_li, na_fields = _relevant_fields(item)
+    required_set = set(doc_contract.REQUIRED_FIELDS.get(dtype, []))
+
+    # 合并人工决策（摘要计数按生效状态）
+    open_fields = []
+    counts = {doc_contract.FIELD_RECOGNIZED: 0,
+              doc_contract.FIELD_NEEDS_REVIEW: 0,
+              doc_contract.FIELD_NOT_FOUND: 0,
+              doc_contract.FIELD_BUSINESS_MISSING: 0}
+    for f in fields_li:
+        status, _src = _effective_status(item, f)
+        counts[status] = counts.get(status, 0) + 1
+        if status in (doc_contract.FIELD_NEEDS_REVIEW,
+                      doc_contract.FIELD_NOT_FOUND):
+            open_fields.append((f, status))
+
+    title = f"📄 {item['label']} · {doc_contract.DOC_TYPE_LABELS.get(dtype, dtype)}"
+    st.markdown(f"##### {title}")
+    st.caption(f"来源文件：{item['filename']}（第{'、'.join(map(str, item['page_nos']))}页）")
+
+    # 摘要卡：只看数字就知道要做什么（P1任务书B2-2）
+    st.markdown(
+        f'<div style="background:#F9FAFB;border:1px solid #E5E7EB;border-radius:12px;'
+        f'padding:10px 16px;font-size:13.5px;">'
+        f'已识别 <b style="color:#1B5E20;">{counts[doc_contract.FIELD_RECOGNIZED]}</b> 项　'
+        f'待您确认 <b style="color:#8D6E00;">{counts[doc_contract.FIELD_NEEDS_REVIEW] + counts[doc_contract.FIELD_NOT_FOUND]}</b> 项　'
+        f'业务缺失 <b style="color:#B71C1C;">{counts[doc_contract.FIELD_BUSINESS_MISSING]}</b> 项'
+        f'　不适用 {len(na_fields)} 项</div>', unsafe_allow_html=True)
+
+    if counts[doc_contract.FIELD_BUSINESS_MISSING]:
+        st.caption("⛔ 已确认业务缺失字段会在核验中判 FAIL，请确认是否需要补办单据。")
+
+    # 字段区：待处理字段默认展开，已识别字段收进展开器
+    open_now = [f for f, s in open_fields]
+    closed_now = [f for f in fields_li if f not in open_now]
+    for f in open_now:
+        _render_field_row(item, f, f in required_set)
+    if closed_now:
+        with st.expander(f"✅ 已识别/已处理字段（{len(closed_now)} 项，点击展开）"):
+            for f in closed_now:
+                _render_field_row(item, f, f in required_set)
+
+    confirmed = st.checkbox(
+        "✅ 本份已核对无误", key=f"wiz_ok::{item['doc_key']}")
+    if not confirmed and open_fields:
+        names = "、".join(_zh(f) for f, _s in open_fields)
+        st.caption(f"还有字段待处理（{names}）——这是识别状态，不代表单据业务不合格。")
+    return len(open_fields), confirmed
+
+
 def _step3_confirm(field_renderer) -> None:
     st.subheader("第3步 · 逐份核对识别结果")
-    st.caption("每一份单据独立展示识别字段（⚠️为提取失败/待复核，可直接补齐或更正），"
-               "核对无误后勾选确认。全部单据确认后才能开始核验。")
+    st.caption("先看每份单据的摘要卡，只处理“待您确认”的少量字段。"
+               "❔未找到 = 系统没有识别到（可能需要补录），⛔业务缺失 = 经您确认"
+               "单据确实没有该字段——两者不是一回事（识别状态 ≠ 业务缺失）。")
     entries = _collect_wizard_documents()
     if not entries:
         st.warning("没有可核验的单据，请回上一步上传。")
@@ -358,76 +644,32 @@ def _step3_confirm(field_renderer) -> None:
             st.rerun()
         st.stop()
 
-    composition = _wkey("wiz_composition") or {}
-    declared_total = sum(int(composition.get(t, 0)) for t in COMPOSITION_ORDER)
-    if len(entries) != declared_total:
-        st.warning(f"申报构成共 {declared_total} 份，当前仅识别出 {len(entries)} 份；"
-                   "缺失部分核验时会按『实收与申报构成不符』显式提示。")
-
-    batch_id = f"pdf_wiz_{_wkey('wiz_files_sig') or 'batch'}"
     all_confirmed = True
+    total_open = 0
     for item in entries:
-        doc = dict(item["doc"])
-        ingest = item["ingest"]
-        missing = [k for k, v in ingest.field_confidence.items() if v == "missing"]
-        review = [k for k, v in ingest.field_confidence.items() if v == "review"]
-        badges = []
-        if missing:
-            badges.append(f"⛔{len(missing)}个字段提取失败")
-        if review:
-            badges.append(f"⚠️{len(review)}个字段待复核")
-        title = f"📄 {item['label']} · {item['filename']}" \
-                f"（第{'、'.join(map(str, item['page_nos']))}页）"
-        if badges:
-            title += "　" + "　".join(badges)
-        with st.expander(title, expanded=bool(missing or review)):
-            confirmed = st.checkbox("✅ 本份已核对无误", key=f"wiz_ok::{item['doc_key']}")
-            all_confirmed = all_confirmed and confirmed
-            st.caption("识别类型可纠正（纠正后按新类型重新提取字段）；字段可直接编辑补齐。")
-            chosen = st.selectbox(
-                "识别类型", options=["keep"] + COMPOSITION_ORDER + ["unknown"],
-                format_func=lambda t: "自动识别（不纠正）" if t == "keep"
-                else doc_contract.DOC_TYPE_LABELS.get(t, "无法识别（需人工指定）"),
-                key=f"wiz_type::{item['doc_key']}")
-            if chosen and chosen != "keep" and chosen != doc["doc_type"]:
-                for key in list(st.session_state.keys()):
-                    if key.startswith(f"fld::{batch_id}::{doc['doc_id']}::"):
-                        del st.session_state[key]
-                doc["doc_type"] = chosen
-                texts = [p.text for p in ingest.pages]
-                fields, conf, warnings = pdf_ingest.extract_fields(chosen, texts)
-                doc["fields"] = fields
-                ingest.field_confidence = conf
-                ingest.warnings = list(warnings)
-                ingest.doc_type = chosen
-            for w in ingest.warnings[:6]:
-                st.warning(w)
-            rows = ["| 字段 | 提取值 | 置信度 |", "|---|---|---|"]
-            for k, v in sorted(ingest.field_confidence.items()):
-                mark = {"high": "✅", "review": "⚠️ 存疑", "missing": "⛔ 缺失"}.get(v, v)
-                rows.append(f"| `{k}` | {doc['fields'].get(k, '—')} | {mark} |")
-            st.markdown("\n".join(rows))
-            fields, _delta = field_renderer(batch_id, doc)
-            item["edited_fields"] = fields
+        open_n, confirmed = _render_document(item)
+        total_open += open_n
+        all_confirmed = all_confirmed and confirmed
+        st.divider()
 
     if st.button("← 上一步（调整上传）", key="wiz_back2"):
         st.session_state["wiz_step"] = 2
         st.rerun()
     if not all_confirmed:
+        if total_open:
+            st.caption(f"提示：共 {total_open} 个字段待处理，但仍可逐份勾选“已核对无误”"
+                       "继续——未识别字段不会自动判单据不合格。")
         st.caption("请逐份勾选「本份已核对无误」后才能开始核验。")
     if st.button("✅ 确认全部单据，开始核验 →", type="primary",
                  disabled=not all_confirmed, key="wiz_run"):
-        # 快照当前确认结果（含编辑后字段），进入核验步骤
+        # 合并人工决策 → 快照单据（含编辑后字段与四状态证据）
         snapshot = []
         for item in entries:
-            doc = dict(item["doc"])
-            if item.get("edited_fields") is not None:
-                doc["fields"] = item["edited_fields"]
+            doc = _apply_decisions(item)
             snapshot.append(doc)
         st.session_state["wiz_confirmed_docs"] = snapshot
         st.session_state["wiz_step"] = 4
         st.rerun()
-
 
 # ---------------------------------------------------------------- 组装批次
 

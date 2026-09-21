@@ -27,6 +27,7 @@
 #   invoice                    = 商业发票 Commercial Invoice
 #   packing_list               = 装箱单 Packing List
 #   railway_waybill            = 国际铁路运单 Railway Consignment Note
+#   smgs_rail_waybill          = 国际货协运单（СМГС）SMGS Rail Waybill
 #   export_customs_declaration = 出口报关单 Export Customs Declaration
 #   certificate_of_origin      = 原产地证书 Certificate of Origin
 #
@@ -44,6 +45,8 @@
 #   invoice_date=发票日期     unit_price=单价            incoterm=价格条款(Incoterms)
 #   contract_no=合同号        package_type=包装方式      marks=唛头
 #   reference_invoice_no=对应发票号
+#   packing_type=包装种类   seal_no=封印号     cargo_value=货值
+#   attached_documents=随附文件  carrier_segments=承运人（区段）
 #
 # ──【与现有引擎检查的分工与叠加口径】─────────────────────────────────────
 #   - 缺整套中哪种单证：引擎 DOC-001 判定，本知识库不重复设；
@@ -72,9 +75,79 @@
 #   （净重/经停国/产地证收货人/签发机构）；④ 发票日期、HS编码、原产国声明、
 #   单价、Incoterms、合同号、唛头、包装方式、对应发票号等因冻结评估集结构性
 #   未载明，按"待启用"处理（见各规则处注释），待业务侧决定重建评估集后启用。
-version: doc-rules v2.0
+#   doc-rules v2.1 (2026-09-21) SMGS国际货协运单类型规则（P0任务书A2）：
+#   smgs_rail_waybill 专用必填集；配合字段四状态口径——带识别证据的单据仅
+#   "业务确认缺失"触发 required 规则（not_found/needs_review 是识别状态）。
+version: doc-rules v2.1
 
 rules:
+
+  # ============================== 国际货协运单（СМГС/SMGS） ==============================
+  # 类型说明：СМГС版式运单的运单类型自明（route检查自动按SMGS口径），
+  # 故不设 waybill_type 必填规则；币种/申报金额/经停国不是该单证固有栏位，
+  # 按任务书A2不设必填（页面显示"不适用/未要求"）。
+  - rule_id: smgs_waybill_no_required
+    doc_type: smgs_rail_waybill
+    field: waybill_no
+    rule_type: required
+    severity: fail
+    message: 国际货协运单缺少运单号
+    suggestion: 运单号是单据唯一标识，请按СМГС运单抬头的编号（Номер накладной）补填后再提交
+    enabled: true
+
+  - rule_id: smgs_waybill_consignor_required
+    doc_type: smgs_rail_waybill
+    field: consignor_name
+    rule_type: required
+    severity: fail
+    message: 国际货协运单缺少发货人（栏位1）
+    suggestion: 请按СМГС运单栏位1（Отправитель/发货人）补填发货人完整企业名称
+    enabled: true
+
+  - rule_id: smgs_waybill_consignee_required
+    doc_type: smgs_rail_waybill
+    field: consignee_name
+    rule_type: required
+    severity: fail
+    message: 国际货协运单缺少收货人（栏位4）
+    suggestion: 请按СМГС运单栏位4（Получатель/收货人）补填收货人完整企业名称（俄文名称不得截断）
+    enabled: true
+
+  - rule_id: smgs_waybill_goods_required
+    doc_type: smgs_rail_waybill
+    field: goods_description
+    rule_type: required
+    severity: fail
+    message: 国际货协运单缺少货物名称（栏位15）
+    suggestion: 请按СМГС运单栏位15（Наименование груза/货物名称）补填货物描述
+    enabled: true
+
+  - rule_id: smgs_waybill_packages_required
+    doc_type: smgs_rail_waybill
+    field: total_packages
+    rule_type: required
+    severity: fail
+    message: 国际货协运单缺少件数（栏位17）
+    suggestion: 请按СМГС运单栏位17（Число мест/件数）补填货物件数
+    enabled: true
+
+  - rule_id: smgs_waybill_gross_weight_required
+    doc_type: smgs_rail_waybill
+    field: gross_weight_kg
+    rule_type: required
+    severity: fail
+    message: 国际货协运单缺少货物重量（栏位18）
+    suggestion: 请按СМГС运单栏位18（Вес/重量）补填毛重（кг）；重量口径不明时请先人工确认
+    enabled: true
+
+  - rule_id: smgs_waybill_container_required
+    doc_type: smgs_rail_waybill
+    field: container_no
+    rule_type: required
+    severity: warning
+    message: 国际货协运单未提取到集装箱号（栏位7）
+    suggestion: 请核对СМГС运单栏位7（Контейнер/集装箱）中的ISO箱号（如TKRU4625794）并补填
+    enabled: true
 
   # ============================== 国际铁路运单 ==============================
   - rule_id: waybill_consignee_required

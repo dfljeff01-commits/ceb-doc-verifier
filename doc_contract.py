@@ -35,6 +35,7 @@ SUPPORTED_DOC_TYPES = [
     "invoice",
     "packing_list",
     "railway_waybill",
+    "smgs_rail_waybill",
     "export_customs_declaration",
     "certificate_of_origin",
 ]
@@ -43,10 +44,15 @@ DOC_TYPE_LABELS = {
     "invoice": "商业发票 Commercial Invoice",
     "packing_list": "装箱单 Packing List",
     "railway_waybill": "国际铁路运单 Railway Consignment Note",
+    "smgs_rail_waybill": "国际货协运单（СМГС）SMGS Rail Waybill",
     "export_customs_declaration": "出口报关单 Export Customs Declaration",
     "certificate_of_origin": "原产地证书 Certificate of Origin",
     "unknown": "无法识别（需人工指定）",
 }
+
+# 运单类单据集合：齐全性检查（DOC-001）中任一运单类型即可满足"铁路运单"席位；
+# SMGS 是铁路运单的一种版式（栏位号+中俄双语），不是另一种业务单证。
+RAIL_WAYBILL_TYPES = ("railway_waybill", "smgs_rail_waybill")
 
 # 各类型必填字段。分两层使用：
 #   - 身份字段（*_no / co_no / declaration_no）缺失 → 引擎 DOC-002 检查项 WARNING；
@@ -61,6 +67,12 @@ REQUIRED_FIELDS = {
     "railway_waybill": ["waybill_no", "waybill_type", "consignor_name",
                         "consignee_name", "route_countries", "goods_description",
                         "total_packages", "gross_weight_kg", "container_no"],
+    # SMGS运单按栏位语义取必填集合：币种/申报金额等不是该单证的固有栏位
+    # （任务书A2：非必填字段显示"不适用"，不得报红）。运单类型对SMGS是自明的
+    # （单证本身即СМГС版式），经停国家在SMGS中无对应栏位，均不列为必填。
+    "smgs_rail_waybill": ["waybill_no", "consignor_name", "consignee_name",
+                          "goods_description", "total_packages",
+                          "gross_weight_kg", "container_no"],
     "export_customs_declaration": ["declaration_no", "consignor_name", "consignee_name",
                                    "goods_description", "total_packages", "gross_weight_kg",
                                    "declared_value", "currency", "waybill_no",
@@ -75,12 +87,39 @@ IDENTITY_FIELDS = {
     "invoice": "invoice_no",
     "packing_list": "packing_list_no",
     "railway_waybill": "waybill_no",
+    "smgs_rail_waybill": "waybill_no",
     "export_customs_declaration": "declaration_no",
     "certificate_of_origin": "co_no",
 }
 
+# 对当前单证类型"不适用/未要求"的字段（任务书A2：不报红、不计失败）。
+# 口径：这些字段在其他单证类型上常见，但在该类型上无对应栏位或非业务要求，
+# 页面与报告以灰色"不适用"呈现，不进入提取失败统计。
+NOT_APPLICABLE_FIELDS = {
+    "smgs_rail_waybill": ["waybill_type", "route_countries", "total_amount",
+                          "declared_value", "packing_list_no", "invoice_no",
+                          "declaration_no", "co_no", "departure_country",
+                          "origin_country", "hs_code", "incoterm",
+                          "contract_no", "reference_invoice_no", "marks"],
+    "railway_waybill": ["total_amount", "declared_value", "packing_list_no",
+                        "invoice_no", "declaration_no", "co_no",
+                        "origin_country", "hs_code", "incoterm",
+                        "contract_no", "reference_invoice_no"],
+    "invoice": ["waybill_no", "waybill_type", "route_countries",
+                "departure_station", "destination_station", "seal_no",
+                "attached_documents", "carrier_segments", "packing_type",
+                "container_no", "declaration_no", "co_no"],
+    "packing_list": ["total_amount", "currency", "waybill_type",
+                     "route_countries", "departure_station",
+                     "destination_station", "seal_no", "declaration_no",
+                     "co_no", "declared_value"],
+    "certificate_of_origin": ["waybill_no", "waybill_type", "route_countries",
+                              "gross_weight_kg", "seal_no", "total_amount",
+                              "declaration_no"],
+}
+
 NUMERIC_FIELDS = {"total_packages", "gross_weight_kg", "net_weight_kg",
-                  "total_amount", "declared_value"}
+                  "total_amount", "declared_value", "cargo_value"}
 INTEGER_FIELDS = {"total_packages"}          # 计件数按整数契约校验（F01）
 LIST_FIELDS = {"route_countries"}
 CURRENCY_PAIR_FIELDS = ("currency",)          # 发票与报关单需币种一致
@@ -100,7 +139,79 @@ FIELD_LABELS_ZH = {
     "hs_code": "HS编码", "invoice_date": "发票日期", "unit_price": "单价",
     "incoterm": "价格条款（Incoterms）", "contract_no": "合同号",
     "package_type": "包装方式", "marks": "唛头", "reference_invoice_no": "对应发票号",
+    # SMGS栏位字段（任务书A3）
+    "packing_type": "包装种类", "seal_no": "封印号",
+    "cargo_value": "货值", "attached_documents": "随附文件",
+    "carrier_segments": "承运人（区段）",
 }
+
+
+# ---------------------------------------------------------------- 字段四状态契约（P0任务书A1）
+#
+# "识别"与"业务"必须分离：抽取不到 ≠ 单据缺这项内容。四状态全系统同口径
+# （抽取层/规则层/页面/报告共用本组常量），红色仅用于 business_missing 与
+# 真正的核验 FAIL。
+
+FIELD_RECOGNIZED = "recognized"          # 已识别：找到可信候选并完成标准化
+FIELD_NEEDS_REVIEW = "needs_review"      # 待人工确认：有候选但置信度/归属不确定
+FIELD_NOT_FOUND = "not_found"            # 未找到候选值（≠ 业务缺失，不得报红）
+FIELD_BUSINESS_MISSING = "business_missing"  # 业务确认缺失（人工确认后才成立）
+FIELD_NOT_APPLICABLE = "not_applicable"  # 对当前单证类型不适用/未要求
+
+FIELD_STATUS_LABELS = {
+    FIELD_RECOGNIZED: "已识别",
+    FIELD_NEEDS_REVIEW: "待人工确认",
+    FIELD_NOT_FOUND: "未找到（请补录或确认）",
+    FIELD_BUSINESS_MISSING: "业务确认缺失",
+    FIELD_NOT_APPLICABLE: "不适用/未要求",
+}
+
+# 未完成状态（页面需要用户处理的）；business_missing 虽是终态但需醒目提示
+FIELD_OPEN_STATUSES = (FIELD_NEEDS_REVIEW, FIELD_NOT_FOUND,
+                       FIELD_BUSINESS_MISSING)
+
+
+def field_status(doc: dict, field: str) -> str:
+    """字段状态统一入口（页面/规则/报告共用）。
+    优先读 field_meta（PDF摄取路径的四状态证据）；无证据时按值是否为空回退
+    legacy 口径——有值=recognized，无值=not_found（旧数据无法证明业务缺失，
+    是否判 FAIL 由规则层按有无 field_meta 区分，见 doc_rules.check_document）。"""
+    meta = doc.get("field_meta") if isinstance(doc, dict) else None
+    if isinstance(meta, dict):
+        status = (meta.get(field) or {}).get("status")
+        if status in FIELD_STATUS_LABELS:
+            return status
+    fields = (doc or {}).get("fields") or {}
+    return FIELD_RECOGNIZED if fields.get(field) not in (None, "", [], {}) \
+        else FIELD_NOT_FOUND
+
+
+def has_field_meta(doc: dict) -> bool:
+    """该单据是否带四状态证据（决定规则层走新口径还是 legacy 口径）。"""
+    meta = (doc or {}).get("field_meta")
+    return isinstance(meta, dict) and bool(meta)
+
+
+def summarize_field_status(doc: dict) -> dict:
+    """单据字段状态汇总（页面摘要卡用）：各状态计数 + 待处理字段名清单。
+    只统计该类型相关的字段（必填 ∪ 实际出现的字段），不适用字段单独计数。"""
+    dtype = (doc or {}).get("doc_type") or "unknown"
+    fields = (doc or {}).get("fields") or {}
+    meta = (doc or {}).get("field_meta") or {}
+    relevant = set(REQUIRED_FIELDS.get(dtype, [])) | set(fields) | set(meta)
+    na = set(NOT_APPLICABLE_FIELDS.get(dtype, []))
+    counts = {FIELD_RECOGNIZED: 0, FIELD_NEEDS_REVIEW: 0, FIELD_NOT_FOUND: 0,
+              FIELD_BUSINESS_MISSING: 0, FIELD_NOT_APPLICABLE: 0}
+    open_fields: list = []
+    for f in sorted(relevant):
+        if f in na:
+            counts[FIELD_NOT_APPLICABLE] += 1
+            continue
+        status = field_status(doc, f)
+        counts[status] = counts.get(status, 0) + 1
+        if status in FIELD_OPEN_STATUSES:
+            open_fields.append(f)
+    return {"counts": counts, "open_fields": open_fields}
 
 
 # ---------------------------------------------------------------- 数值解析契约（F01/F08）

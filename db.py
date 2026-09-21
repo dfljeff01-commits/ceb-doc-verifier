@@ -199,6 +199,8 @@ CREATE TABLE IF NOT EXISTS documents (
               CHECK (status IN ('PASS', 'WARNING', 'FAIL')),
     UNIQUE (batch_id, doc_id)
 );
+-- P0任务书A1：字段四状态证据（增量列，兼容v2.0已有库）
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS field_meta JSONB;
 CREATE INDEX IF NOT EXISTS idx_documents_batch ON documents (batch_id);
 
 CREATE TABLE IF NOT EXISTS verification_issues (

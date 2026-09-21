@@ -187,16 +187,29 @@ def test_split_results_flow_through_engine_per_document():
                     if r["check_id"] == "DOC-101" and r.get("doc_id") == bad["doc_id"])
     rule_good = next(r for r in v["results"]
                      if r["check_id"] == "DOC-101" and r.get("doc_id") == good["doc_id"])
-    assert rule_bad["status"] == STATUS_FAIL
-    assert "收货人" in rule_bad["detail"]
+    # 四状态口径（P0任务书A1）：缺收货人但带识别证据（not_found）不得自动FAIL——
+    # 不是业务确认缺失，只是没识别到
+    assert rule_bad["status"] != STATUS_FAIL
     assert rule_good["status"] == STATUS_PASS
-    # 分组视图：缺收货人的规范问题只落在坏运单的组里
-    g_bad = next(g for g in v["document_groups"] if g["doc_id"] == bad["doc_id"])
-    g_good = next(g for g in v["document_groups"] if g["doc_id"] == good["doc_id"])
+
+    # 人工确认"业务缺失"后才判 FAIL（business_missing 只能由确认产生）
+    bad["field_meta"] = {**(bad.get("field_meta") or {}),
+                          "consignee_name": {"status": "business_missing",
+                                             "value": None}}
+    v2 = run_verification({"batch_id": "t2",
+                            "documents": base_documents() + [good, bad],
+                            "declared_composition": {**DECLARED_FULL,
+                                                      "railway_waybill": 2}})
+    rule_bad2 = next(r for r in v2["results"]
+                     if r["check_id"] == "DOC-101" and r.get("doc_id") == bad["doc_id"])
+    assert rule_bad2["status"] == STATUS_FAIL
+    assert "收货人" in rule_bad2["detail"]
+
+    # 分组视图：人工确认缺失的规范问题只落在坏运单的组里
+    g_bad = next(g for g in v2["document_groups"] if g["doc_id"] == bad["doc_id"])
+    g_good = next(g for g in v2["document_groups"] if g["doc_id"] == good["doc_id"])
     assert any(i["check_id"] == "DOC-101" for i in g_bad["issues"])
     assert not any(i["check_id"] == "DOC-101" for i in g_good["issues"])
-    assert g_good["fail_count"] == 0 or all(i["check_id"] != "DOC-101"
-                                            for i in g_good["issues"])
 
 
 # ---------------------------------------------------------------- 问题二：声明构成
