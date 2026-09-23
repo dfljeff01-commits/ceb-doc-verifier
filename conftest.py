@@ -45,6 +45,12 @@ def _clean_business_tables():
     db.execute("DELETE FROM documents")
     db.execute("DELETE FROM batches")
     db.execute("DELETE FROM users")
+    # 数据核对模块v1（FK顺序：est→trips，settlement/subsidy 级联也显式清）
+    db.execute("DELETE FROM train_prepayments")
+    db.execute("DELETE FROM train_est_numbers")
+    db.execute("DELETE FROM train_settlements")
+    db.execute("DELETE FROM train_subsidies")
+    db.execute("DELETE FROM train_trips")
 
 
 @pytest.fixture

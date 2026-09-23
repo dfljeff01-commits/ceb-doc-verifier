@@ -6,7 +6,7 @@
   1. 登录门禁：未登录显示登录页（用户名+密码，内部系统口径）；
   2. 角色化导航：登录后按角色装配页面（st.navigation）——
        business 业务   : 单据核对
-       finance 财务    : 数据核对（建设中占位）
+       finance 财务    : 数据核对（班列编号+联运结算/补贴对账）
        admin   管理员  : 单据核对 + 数据核对 + 用户管理 + 操作日志
      财务角色对"单据核对"的可见性待业务侧最终确认，本轮默认不可见
      （任务书 §2/§4；调整只需改下方 ROLE_PAGES）；
@@ -132,9 +132,10 @@ def render_home() -> None:
             '<div class="ceb-entry-card">'
             '<span style="font-size:34px;">📊</span>'
             '<div class="t">数据核对</div>'
-            '<div class="d">财务数据比对模块（建设中）。<br>'
-            '<span style="color:#94A3B8;">比对逻辑与对账双方数据源待架构方明确后实施，'
-            '当前为占位页面。</span></div>'
+            '<div class="d">班列统一编号生成与查询（一键复制）→ 联运费用结算/预付款/实付核对 → '
+            '补贴测算与三方对账 → Excel差异导入。<br>'
+            '<span style="color:#94A3B8;">编号规则：发运日期-发站-口岸-目的地-L/T；'
+            'v1范围不含客户报价/客户预付款/票据流（待v2任务书）。</span></div>'
             '</div>', unsafe_allow_html=True)
         if role in ("finance", "admin"):
             st.page_link(PAGE_DATA, label="进入数据核对 →", icon="📊", use_container_width=True)

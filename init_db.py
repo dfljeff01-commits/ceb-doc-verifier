@@ -22,6 +22,7 @@ import secrets
 import audit
 import auth_service
 import db
+import train_store
 
 SEED_ACCOUNTS = (
     # (用户名env, 密码env, 默认用户名, 角色)
@@ -63,6 +64,10 @@ def main() -> None:
     for username, role, random_pw in created:
         suffix = "（随机密码已打印一次）" if random_pw else "（密码来自环境变量）"
         print(f"[init_db] 种子账号就绪：{username} / {role}{suffix}")
+    # 数据核对模块v1：缩写代码字典 + 核对阈值种子（逐行幂等，不覆盖人工修改）
+    seeded = train_store.seed_refs_if_absent()
+    print(f"[init_db] 数据核对引用数据就绪：字典新增 {seeded['codes']} 行，"
+          f"配置新增 {seeded['config']} 行")
 
 
 if __name__ == "__main__":

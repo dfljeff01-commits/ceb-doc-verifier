@@ -4,14 +4,21 @@
 
 用法：python selftest.py
 按竞赛验收标准逐项断言三组批次的核验结果，全部通过时输出 SELFTEST PASSED。
+数据核对模块v1 追加纯逻辑段（train_number/train_recon，均为标准库实现）：
+  9条真实记录编号回归（含10-10临/图两条不合并的专项断言）、兜底去重后缀、
+  EST预估编号、编号反解析、预付覆盖/结算差异/三方对账阈值/相邻重复值检测。
 """
 
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 from verification_engine import (STATUS_FAIL, STATUS_PASS, STATUS_WARNING,
                                  run_verification, sort_results_by_severity)
+
+import train_number
+import train_recon
 
 SAMPLE_DIR = Path(__file__).parent / "sample_data"
 
@@ -116,6 +123,66 @@ def main() -> int:
           len(risk_high["breakdown"]) == 4
           and len({b["points"] for b in risk_high["breakdown"]}) > 1,
           str([b["points"] for b in risk_high["breakdown"]]))
+
+    # ---- 数据核对模块v1：班列编号与核对纯逻辑（任务书回归用例） ----
+    print("== 数据核对v1：班列统一编号（9条回归） ==")
+    fixture = json.loads(
+        (SAMPLE_DIR / "datacheck" / "datacheck_trips_v1.json").read_text(encoding="utf-8"))
+    code_map = fixture["code_map"]
+    existing: set[str] = set()
+    generated = []
+    for rec, expected in zip(fixture["records"], fixture["expected_numbers"]):
+        no, suffix = train_number.build_number(
+            rec["dep_date"], rec["station"], rec["port"], rec["dest"],
+            rec["train_type"], code_map, existing)
+        existing.add(no)
+        generated.append(no)
+        check(f"记录{rec['no']} {rec['dep_date']} {rec['station']}-{rec['port']}-"
+              f"{rec['dest']}-{rec['train_type']} → {expected}",
+              no == expected and suffix == 0, f"实际 {no}")
+    check("10-10临 与 10-10图 同日同线路生成两个不同编号（不合并/不冲突）",
+          "20251010-PW-MZL-RU-L" in generated and "20251010-PW-MZL-RU-T" in generated
+          and len(set(generated)) == len(generated))
+    dup_no, dup_suffix = train_number.build_number(
+        "2025-10-10", "PW", "MZL", "RU", "T", code_map, existing)
+    check("兜底去重：同主干再登记 → 追加 -01 序号后缀",
+          dup_no == "20251010-PW-MZL-RU-T-01" and dup_suffix == 1, f"实际 {dup_no}")
+    est_no = train_number.build_est("2025-10-15", "PW", "MZL", "RU", "T",
+                                    code_map)[0]
+    check("预估编号格式 EST-YYYYMMDD-…", est_no == "EST-20251015-PW-MZL-RU-T",
+          f"实际 {est_no}")
+    parsed = train_number.parse_number("20251010-PW-MZL-RU-T-01")
+    check("编号反解析（含序号后缀/EST前缀/假日期拒绝）",
+          parsed is not None and parsed["suffix"] == 1
+          and train_number.parse_number(est_no)["is_est"] is True
+          and train_number.parse_number("20251332-PW-MZL-RU-T") is None)
+
+    print("== 数据核对v1：核对计算（预付/结算差异/三方阈值/重复值） ==")
+    pay = train_recon.prepay_check("1000.00", [{"amount": "400"}, {"amount": 300}])
+    check("预付覆盖：不足 → 需补款差额=300",
+          pay["verdict"] == "shortage" and pay["diff"] == Decimal("300"))
+    over = train_recon.prepay_check(1000, [{"amount": "1200"}])
+    check("预付覆盖：超出 → 多付200", over["verdict"] == "overpaid"
+          and over["diff"] == Decimal("-200"))
+    sa = train_recon.settle_actual_check(Decimal("2666062.00"), 2660000, "")
+    check("结算≠实付且无差异原因 → needs_reason 提示",
+          sa["needs_reason"] is True and "待人工填写差异原因" in sa["message"])
+    tw_hot = train_recon.three_way_check(
+        {"dt_supply_100": 100000, "ly_advance_100": 106001, "auth_confirm_100": 99000},
+        Decimal("5"), Decimal("5000"))
+    tw_ok = train_recon.three_way_check(
+        {"dt_supply_100": 100000, "ly_advance_100": 103000, "auth_confirm_100": 99000},
+        Decimal("5"), Decimal("5000"))
+    check("三方对账：6%差异触发人工关注 / 3%不触发（5%/5000元阈值）",
+          tw_hot["flag"] is True and tw_ok["flag"] is False)
+    sub_rows = [{"trip_no": f"R{r['no']}", "dep_date": r["dep_date"],
+                 **{k: v for k, v in (r.get("subsidy") or {}).items()}}
+                for r in fixture["records"]]
+    dup_flags = train_recon.duplicate_neighbor_flags(sub_rows)
+    dup_trips = {trip for trip, items in dup_flags.items()
+                 if any(i["field"] == "ly_advance_100" for i in items)}
+    check("重复值检测：恰好命中 10-05/10-10临/10-10图 三条记录的联运垫付补贴100",
+          dup_trips == {"R7", "R8", "R9"}, f"实际 {sorted(dup_trips)}")
 
     passed = all(ok for _, ok in checkpoints)
     print(f"\n{len(checkpoints)} 项检查，{'全部通过' if passed else '存在失败项'}："

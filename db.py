@@ -233,6 +233,126 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_user_time ON audit_logs (username, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_action_time ON audit_logs (action, created_at DESC);
+
+-- ---------------------------------------------------------------- 数据核对模块v1（班列统一编号 + 联运结算/补贴对账）
+
+-- 缩写代码字典（任务书 §一：可维护配置，不硬编码；站点/口岸/目的地后续可增删）
+CREATE TABLE IF NOT EXISTS train_code_dict (
+    category   VARCHAR(16)  NOT NULL CHECK (category IN ('station', 'port', 'dest')),
+    code       VARCHAR(16)  NOT NULL,
+    name       VARCHAR(64)  NOT NULL,
+    sort       INTEGER      NOT NULL DEFAULT 0,
+    active     BOOLEAN      NOT NULL DEFAULT TRUE,
+    updated_by VARCHAR(64),
+    updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (category, code)
+);
+
+-- 运行配置（三方对账告警阈值等；KISS 单表 KV）
+CREATE TABLE IF NOT EXISTS app_config (
+    key         VARCHAR(64)  PRIMARY KEY,
+    value       JSONB        NOT NULL,
+    description VARCHAR(255) NOT NULL DEFAULT '',
+    updated_by  VARCHAR(64),
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- 班列主档：trip_no 即正式编号（任务书 §二"以班列编号为主键"）；
+-- UNIQUE 五元组+序号 是兜底去重的数据库侧兜底（应用层先查后插，冲突自动加 -01/-02）
+CREATE TABLE IF NOT EXISTS train_trips (
+    trip_no        TEXT         PRIMARY KEY,
+    dep_date       DATE         NOT NULL,
+    station_code   VARCHAR(16)  NOT NULL,
+    port_code      VARCHAR(16)  NOT NULL,
+    dest_code      VARCHAR(16)  NOT NULL,
+    train_type     VARCHAR(1)   NOT NULL CHECK (train_type IN ('L', 'T')),
+    suffix         SMALLINT     NOT NULL DEFAULT 0,
+    route_label    VARCHAR(128) NOT NULL DEFAULT '',
+    wagon_count    INTEGER,
+    container_40hd INTEGER,
+    container_20hd INTEGER,
+    teu_total      NUMERIC(10,1),
+    goods_name     VARCHAR(128) NOT NULL DEFAULT '',
+    remark         TEXT         NOT NULL DEFAULT '',
+    created_by     VARCHAR(64),
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_by     VARCHAR(64),
+    updated_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    UNIQUE (dep_date, station_code, port_code, dest_code, train_type, suffix)
+);
+CREATE INDEX IF NOT EXISTS idx_trips_dep_date ON train_trips (dep_date);
+
+-- 预估编号及映射留痕（任务书 §一：预估编号→正式编号映射须留痕，不覆盖删除）
+CREATE TABLE IF NOT EXISTS train_est_numbers (
+    est_no       TEXT        PRIMARY KEY,
+    dep_date_est DATE        NOT NULL,
+    station_code VARCHAR(16) NOT NULL,
+    port_code    VARCHAR(16) NOT NULL,
+    dest_code    VARCHAR(16) NOT NULL,
+    train_type   VARCHAR(1)  NOT NULL CHECK (train_type IN ('L', 'T')),
+    official_no  TEXT        UNIQUE REFERENCES train_trips (trip_no),
+    locked_at    TIMESTAMPTZ,
+    locked_by    VARCHAR(64),
+    created_by   VARCHAR(64),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_est_official ON train_est_numbers (official_no);
+
+-- 联运费用结算明细（1:1；四状态沿用单据核对思路，字段允许暂缺不阻断）
+CREATE TABLE IF NOT EXISTS train_settlements (
+    trip_no        TEXT PRIMARY KEY REFERENCES train_trips (trip_no) ON DELETE CASCADE,
+    rail_freight   NUMERIC(14,2),
+    customs_fee    NUMERIC(14,2),
+    service_fee    NUMERIC(14,2),
+    other_fee      NUMERIC(14,2),
+    settle_total   NUMERIC(14,2),
+    actual_freight NUMERIC(14,2),
+    actual_paid_at DATE,
+    diff_reason    TEXT        NOT NULL DEFAULT '',
+    record_status  VARCHAR(20) NOT NULL DEFAULT 'pending'
+                   CHECK (record_status IN ('confirmed', 'pending', 'not_found', 'business_missing')),
+    field_status   JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_by     VARCHAR(64),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 预付款记录（1:N；发运日期未定时可挂预估编号下，故 trip_no 不设外键——
+-- 锁定为正式编号时由 train_store 单事务批量改挂，est_ref 保留原始编号留痕）
+CREATE TABLE IF NOT EXISTS train_prepayments (
+    id         BIGSERIAL    PRIMARY KEY,
+    trip_no    TEXT         NOT NULL,
+    est_ref    TEXT,
+    paid_at    DATE,
+    amount     NUMERIC(14,2),
+    remark     TEXT         NOT NULL DEFAULT '',
+    created_by VARCHAR(64),
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_prepays_trip ON train_prepayments (trip_no);
+
+-- 补贴测算（1:1；review_status=存疑标记，anomalies=系统检测异常快照）
+CREATE TABLE IF NOT EXISTS train_subsidies (
+    trip_no          TEXT PRIMARY KEY REFERENCES train_trips (trip_no) ON DELETE CASCADE,
+    dt_supply_100    NUMERIC(14,2),
+    dt_supply_70     NUMERIC(14,2),
+    ly_advance_100   NUMERIC(14,2),
+    ly_recover_70    NUMERIC(14,2),
+    auth_confirm_100 NUMERIC(14,2),
+    auth_advance_70  NUMERIC(14,2),
+    auth_remain_30   NUMERIC(14,2),
+    forecast_diff    NUMERIC(14,2),
+    diff_reason      TEXT        NOT NULL DEFAULT '',
+    review_status    VARCHAR(16) NOT NULL DEFAULT 'normal'
+                     CHECK (review_status IN ('normal', 'suspect', 'reviewed')),
+    suspect_note     TEXT        NOT NULL DEFAULT '',
+    anomalies        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    record_status    VARCHAR(20) NOT NULL DEFAULT 'pending'
+                     CHECK (record_status IN ('confirmed', 'pending', 'not_found', 'business_missing')),
+    field_status     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_by       VARCHAR(64),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 # 审计不可篡改：数据库层兜底——任何角色（含表 owner）的 UPDATE/DELETE/TRUNCATE 一律拒绝。

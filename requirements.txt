@@ -15,6 +15,8 @@ pyyaml==6.0.3
 pdf2image==1.17.0
 pytesseract==0.3.13
 pillow==12.3.0
+# 数据核对模块v1：Excel 导入解析与模板生成（任务书 §五）
+openpyxl==3.1.5
 # ---- 架构升级新增：PostgreSQL + 登录鉴权 ----
 # PostgreSQL 驱动（连接池见 db.py）
 psycopg2-binary==2.9.10

@@ -56,13 +56,21 @@ import mobile_store
 import pdf_ingest
 from verification_engine import run_verification
 
-API_VERSION = "2.0.0"
+# 鉴权依赖抽到 api_deps（数据核对路由模块共用，避免循环导入）；此处保持原名可用
+from api_deps import get_client_ip, require_roles, require_user
+
+# 数据核对模块v1 路由（/datacheck/*：班列编号+联运结算/补贴对账，财务/管理员）
+from datacheck_api import router as datacheck_router
+
+API_VERSION = "2.1.0"
 
 app = FastAPI(
     title="中欧班列单证智能核验 API",
     description="上传单证批次JSON或PDF/图片文件，返回核验明细、风险评分与AI修正建议。",
     version=API_VERSION,
 )
+
+app.include_router(datacheck_router)
 
 
 @app.on_event("startup")
@@ -78,34 +86,11 @@ def _startup_init_db():
 # 本轮默认不开放——只保留"数据核对"入口，见任务书 §2/§4）
 _DOC_VERIFY_ROLES = ("business", "admin")
 
-_security = HTTPBearer(auto_error=False, description="POST /auth/login 获取的JWT")
+# 数据核对端点的角色口径在 datacheck_api（finance+admin；字典/阈值仅admin），
+# 与 webapp.ROLE_PAGES 同矩阵。
 
-
-def get_client_ip(request: Request) -> str:
-    return request.client.host if request.client else ""
-
-
-def require_user(
-        credentials: HTTPAuthorizationCredentials | None = Depends(_security)) -> dict:
-    """Bearer JWT → 当前用户。缺失/过期/禁用一律 401。"""
-    if credentials is None or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="未登录或缺少访问令牌",
-                            headers={"WWW-Authenticate": "Bearer"})
-    try:
-        return auth_service.verify_token(credentials.credentials)
-    except auth_service.AuthError as exc:
-        raise HTTPException(status_code=401, detail=exc.message,
-                            headers={"WWW-Authenticate": "Bearer"})
-
-
-def require_roles(*roles: str):
-    """角色门禁：不满足返回 403（已登录但无权限）。"""
-    def _dep(user: dict = Depends(require_user)) -> dict:
-        if user.get("role") not in roles:
-            raise HTTPException(status_code=403,
-                                detail="当前角色无权访问该功能")
-        return user
-    return _dep
+# 鉴权依赖（require_user/require_roles/get_client_ip）已抽至 api_deps.py，
+# 由 api.py 与 datacheck_api.py 共用；上方 from api_deps import 保持原名可用。
 
 
 class LoginIn(BaseModel):
@@ -489,4 +474,3 @@ def mobile_recent(limit: int = 20,
                   user: dict = Depends(require_roles(*_DOC_VERIFY_ROLES))):
     """最近上传批次一览（轻量视图，供运维/演示检查持久化结果）。"""
     return {"matches": mobile_store.recent(limit=min(max(limit, 1), 50))}
-

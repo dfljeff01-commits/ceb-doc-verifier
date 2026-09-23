@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import db
@@ -35,6 +36,17 @@ ENABLE_USER = "ENABLE_USER"        # 启用账号
 DISABLE_USER = "DISABLE_USER"      # 禁用账号
 RESET_PASSWORD = "RESET_PASSWORD"  # 重置密码
 
+# ---- 数据核对模块v1（班列编号+联运结算/补贴对账） ----
+DC_QUERY_NUMBER = "DC_QUERY_NUMBER"      # 编号查询（财务查询页）
+DC_COPY_NUMBER = "DC_COPY_NUMBER"        # 复制编号（可选留痕，失败不阻断）
+DC_CREATE_TRIP = "DC_CREATE_TRIP"        # 登记班列（生成正式/预估编号）
+DC_EST_LOCK = "DC_EST_LOCK"              # 预估编号锁定为正式编号（含预付款改挂数）
+DC_IMPORT_PREVIEW = "DC_IMPORT_PREVIEW"  # Excel导入差异预览
+DC_IMPORT_APPLY = "DC_IMPORT_APPLY"      # Excel导入确认应用（含覆盖/保留明细）
+DC_SUSPECT_MARK = "DC_SUSPECT_MARK"      # 补贴记录存疑/复核标记
+DC_CODE_UPDATE = "DC_CODE_UPDATE"        # 缩写代码字典登记/修改
+DC_CONFIG_UPDATE = "DC_CONFIG_UPDATE"    # 核对阈值等配置修改
+
 ACTION_LABELS = {
     LOGIN: "登录", LOGOUT: "登出", LOGIN_FAILED: "登录失败",
     UPLOAD_DOCS: "上传单据", VERIFY: "核验", EDIT_FIELD: "编辑字段",
@@ -42,7 +54,20 @@ ACTION_LABELS = {
     GENERATE_REPORT_PDF: "导出报告PDF", QUICK_CHECK: "现场速查",
     CREATE_USER: "新增账号", ENABLE_USER: "启用账号",
     DISABLE_USER: "禁用账号", RESET_PASSWORD: "重置密码",
+    DC_QUERY_NUMBER: "编号查询", DC_COPY_NUMBER: "复制编号",
+    DC_CREATE_TRIP: "登记班列", DC_EST_LOCK: "预估编号锁定",
+    DC_IMPORT_PREVIEW: "导入预览", DC_IMPORT_APPLY: "导入应用",
+    DC_SUSPECT_MARK: "存疑标记", DC_CODE_UPDATE: "代码字典更新",
+    DC_CONFIG_UPDATE: "核对配置修改",
 }
+
+
+def _jsonable(value):
+    """把 date/Decimal 等非 JSON 原生类型统一转字符串（转不动的再 str()）。
+    审计内容以留痕可读为目的，不追求类型还原。"""
+    if value is None:
+        return None
+    return json.loads(json.dumps(value, default=str, ensure_ascii=False))
 
 
 def record(username: str, action: str, object_type: str | None = None,
@@ -54,7 +79,8 @@ def record(username: str, action: str, object_type: str | None = None,
         " detail, before_value, after_value, ip)"
         " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (username or "anonymous", action, object_type, object_id,
-         db.jsonb(detail), db.jsonb(before), db.jsonb(after), ip))
+         db.jsonb(_jsonable(detail)), db.jsonb(_jsonable(before)),
+         db.jsonb(_jsonable(after)), ip))
     return rows[0]["id"]
 
 
