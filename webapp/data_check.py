@@ -28,6 +28,7 @@ import streamlit as st
 
 import audit
 import datacheck_import
+import fund_store
 import train_store
 from webapp import session
 
@@ -340,6 +341,57 @@ def dc_template(kind: str) -> bytes | None:
         return None
 
 
+# ================================================================ v1.1 资金/费用批次
+
+def dc_list_fund_batches(batch_type: str = "") -> list | None:
+    r = _api("GET", "/datacheck/fund-batches",
+              params={"batch_type": batch_type} if batch_type else None)
+    if r is not None:
+        return r.json().get("batches", [])
+    try:
+        return fund_store.list_batches(batch_type or None)
+    except Exception as exc:
+        st.error(str(exc))
+        return None
+
+
+def dc_create_fund_batch(payload: dict) -> dict | None:
+    r = _api("POST", "/datacheck/fund-batches", json=payload)
+    if r is not None:
+        return r.json()
+    try:
+        return fund_store.create_batch(
+            batch_type=payload["batch_type"],
+            total_amount=payload["total_amount"],
+            paid_at=payload.get("paid_at") or None,
+            fund_purpose=payload.get("fund_purpose", "预付运费"),
+            counterparty=payload.get("counterparty", ""),
+            cost_category=payload.get("cost_category"),
+            trip_nos=[t["trip_no"] for t in payload.get("trips", [])],
+            allocations={t["trip_no"]: t.get("allocated_amount")
+                         for t in payload.get("trips", [])
+                         if t.get("allocated_amount") is not None},
+            remark=payload.get("remark", ""),
+            by=session.current_username())
+    except Exception as exc:
+        st.error(str(exc))
+        return None
+
+
+def dc_fund_participates(batch_id: str, participates: bool,
+                         reason: str) -> bool:
+    r = _api("PUT", f"/datacheck/fund-batches/{batch_id}/participates",
+             json={"participates": participates, "reason": reason})
+    if r is None:
+        try:
+            fund_store.set_participates(batch_id, participates, reason,
+                                       session.current_username())
+        except Exception as exc:
+            st.error(str(exc))
+            return False
+    return True
+
+
 # ================================================================ 展示辅助
 
 def _money(value) -> str:
@@ -397,8 +449,9 @@ def render() -> None:
     st.caption("班列统一编号 · 联运结算与补贴对账（v1）　|　"
                "编号规则：发运日期-发站-口岸-目的地-L/T，同日同线路同类型自动加 -01 后缀")
 
-    tab_query, tab_ledger, tab_register, tab_recon, tab_import = st.tabs(
-        ["🔎 编号查询", "📋 班列台账", "➕ 登记班列", "⚖️ 三方对账", "📥 Excel导入"])
+    tab_query, tab_ledger, tab_register, tab_recon, tab_fund, tab_import = st.tabs(
+        ["🔎 编号查询", "📋 班列台账", "➕ 登记班列", "⚖️ 三方对账",
+         "💰 资金/费用批次", "📥 Excel导入"])
 
     with tab_query:
         _tab_query()
@@ -408,6 +461,8 @@ def render() -> None:
         _tab_register()
     with tab_recon:
         _tab_recon()
+    with tab_fund:
+        _tab_fund_batches()
     with tab_import:
         _tab_import()
 
@@ -928,3 +983,192 @@ def _tab_import() -> None:
             st.session_state.pop("imp_preview", None)
             st.session_state.pop("imp_decisions", None)
             st.session_state.pop("ledger_trips", None)
+
+
+# ---------------------------------------------------------------- 💰 资金/费用批次（v1.1）
+
+_BATCH_VERDICT_LABEL = {
+    "covered": "✅ 批次总额一致",
+    "shortage": "⚠️ 口径合计多于批次额",
+    "under": "⚠️ 口径合计少于批次额",
+    "skipped": "➖ 不参与核对",
+    "unknown": "❔ 无法核对",
+}
+
+
+def _tab_fund_batches() -> None:
+    st.markdown("##### 资金/费用批次（一笔钱覆盖多趟车 / 多笔钱结清同一批车）")
+    st.caption("批次总金额是唯一权威数字；只需告诉系统「这张付款单/发票覆盖哪几趟车、"
+               "总共多少钱」，每趟车分摊金额可以留空，系统按批次整体核对——"
+               "不再因某趟车账面记0就误报亏损。")
+
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        filter_type = st.radio(
+            "批次类型", ["", "prepay", "cost"],
+            format_func=lambda v: {"": "全部", "prepay": "预付款批次",
+                                   "cost": "费用/账单批次"}[v],
+            key="fund_filter")
+    batches = dc_list_fund_batches(filter_type)
+    if batches is None:
+        return
+
+    with st.expander("➕ 创建批次", expanded=not batches):
+        _fund_create_form()
+
+    st.divider()
+    if not batches:
+        st.info("尚无批次记录。")
+    else:
+        rows = []
+        for b in batches:
+            cov = b.get("coverage", {})
+            rows.append({
+                "批次号": b["batch_id"],
+                "类型": "预付" if b["batch_type"] == "prepay" else "费用",
+                "用途": b.get("fund_purpose", ""),
+                "打款/开票": str(b.get("paid_at") or "—"),
+                "批次总额": _money(b.get("total_amount")),
+                "关联车数": len(b.get("trips", [])),
+                "口径合计": _money(cov.get("covered_total")),
+                "差额": _money(cov.get("diff")) if cov.get("diff") not in (None, 0) else "0.00",
+                "核对": _BATCH_VERDICT_LABEL.get(cov.get("verdict"),
+                                                 cov.get("verdict", "")),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        for b in batches:
+            cov = b.get("coverage", {})
+            with st.expander(f"📄 {b['batch_id']} · "
+                             f"{_BATCH_VERDICT_LABEL.get(cov.get('verdict'), '')}"):
+                st.caption(cov.get("message", ""))
+                if b.get("counterparty"):
+                    st.caption(f"对方主体：{b['counterparty']}"
+                               + (f"　费用类目：{b['cost_category']}"
+                                  if b.get("cost_category") else ""))
+                link_rows = [{
+                    "班列编号": t["trip_no"],
+                    "分摊金额": _money(t.get("allocated_amount"))
+                                 if t.get("allocated_amount") is not None else "（未拆分）",
+                } for t in b.get("trips", [])]
+                st.dataframe(pd.DataFrame(link_rows),
+                             use_container_width=True, hide_index=True)
+                if cov.get("missing_trip_amounts"):
+                    st.caption("以下关联班列暂无结算口径数据："
+                               + "、".join(cov["missing_trip_amounts"]))
+                _fund_participates_editor(b)
+
+    st.divider()
+    st.markdown("##### 🕸️ 孤儿/重复登记检测（安全网）")
+    if st.button("运行检测"):
+        r = _api("GET", "/datacheck/fund-batches/orphan-check/run")
+        result = r.json() if r is not None else fund_store.run_orphan_check()
+        if result.get("has_issue"):
+            st.warning(result["message"])
+            if result.get("unknown_trip_links"):
+                for item in result["unknown_trip_links"]:
+                    st.markdown(f"- 批次 `{item['batch_id']}` → 不存在的编号 "
+                                f"`{item['trip_no']}`")
+            for item in result.get("duplicate_risk", []):
+                st.markdown(f"- `{item['trip_no']}` 同时在旧表登记预付款，"
+                            f"批次：{'、'.join(item['batches'])}")
+        else:
+            st.success(result["message"])
+
+
+def _fund_create_form() -> None:
+    with st.form("fund_batch_form", border=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            batch_type = st.radio(
+                "批次类型 *", ["prepay", "cost"],
+                format_func=lambda v: "预付款（我们付给联运）" if v == "prepay"
+                else "费用/账单（联运开给我们）",
+                horizontal=True, key="fb_type")
+            paid_at = st.date_input("打款/开票日期 *", value=date.today(),
+                                    key="fb_date")
+        with c2:
+            # 用途：常规选项直接展示；保证金收进"更多历史科目"折叠区
+            purpose = st.selectbox(
+                "资金用途 *",
+                options=["预付运费", "尾款结算", "补贴回款", "其他"],
+                key="fb_purpose")
+            show_hist = st.checkbox("更多/历史科目（保证金）", key="fb_hist")
+            if show_hist:
+                purpose = st.selectbox("历史科目", ["保证金"],
+                                        key="fb_purpose_hist")
+            counterparty = st.text_input("对方主体（可留空）", key="fb_cp")
+        amount_text = st.text_input("批次总金额（元）*", key="fb_amount",
+                                    placeholder="唯一权威金额")
+        cost_category = None
+        if batch_type == "cost":
+            cost_category = st.selectbox(
+                "费用类目 *", ["铁路运费", "报关费", "服务费", "其他"],
+                key="fb_cost_cat")
+        trips_text = st.text_area(
+            "关联班列编号 *（每行一个；正式编号或EST-编号均可）",
+            key="fb_trips", height=90,
+            placeholder="20250808-DT-EL-RU-T\n20250809-ZD-HGS-ZY-T")
+        alloc_text = st.text_area(
+            "分摊金额（可选；格式：班列编号=金额，每行一条；留空即不拆分）",
+            key="fb_allocs", height=70,
+            placeholder="20250808-DT-EL-RU-T=2581233.30")
+        remark = st.text_input("备注（用途选「其他」时必填具体说明）", key="fb_remark")
+        submitted = st.form_submit_button("创建批次", type="primary")
+
+    if not submitted:
+        return
+    errors = []
+    amount = amount_text.strip().replace(",", "")
+    if not amount:
+        errors.append("请填写批次总金额")
+    trip_nos = [t.strip() for t in trips_text.splitlines() if t.strip()]
+    if not trip_nos:
+        errors.append("请至少填写1趟关联班列编号")
+    allocations = {}
+    for line in alloc_text.splitlines():
+        if "=" not in line:
+            continue
+        no, val = line.split("=", 1)
+        allocations[no.strip()] = val.strip()
+    if purpose == "其他" and not remark.strip():
+        errors.append("用途为「其他」时必须在备注填写具体说明")
+    if errors:
+        for e in errors:
+            st.error(e)
+        return
+    payload = {
+        "batch_type": batch_type,
+        "total_amount": amount,
+        "paid_at": paid_at.isoformat(),
+        "fund_purpose": purpose,
+        "counterparty": counterparty,
+        "cost_category": cost_category,
+        "trips": [{"trip_no": no,
+                   "allocated_amount": allocations.get(no)}
+                  for no in trip_nos],
+        "remark": remark,
+    }
+    result = dc_create_fund_batch(payload)
+    if result:
+        st.success(f"批次已创建：{result['batch_id']}")
+        st.rerun()
+
+
+def _fund_participates_editor(batch: dict) -> None:
+    """参与核对标志的人工改写（必须原因+留痕）。"""
+    current = batch.get("participates_in_freight_recon", True)
+    with st.expander("⚙️ 高级：人工改写「参与运费核对」"):
+        new_flag = st.checkbox(
+            "该批次参与运费覆盖核对", value=bool(current),
+            key=f"fb_rec::{batch['batch_id']}")
+        if new_flag != bool(current):
+            reason = st.text_input(
+                "改写原因（必填，系统留痕）",
+                key=f"fb_rec_reason::{batch['batch_id']}")
+            if st.button("保存改写", key=f"fb_rec_save::{batch['batch_id']}"):
+                if dc_fund_participates(batch["batch_id"], new_flag, reason):
+                    st.success("已保存（EDIT_FIELD 留痕）。")
+                    st.rerun()
+        elif batch.get("recon_override_reason"):
+            st.caption(f"历史改写原因：{batch['recon_override_reason']}")

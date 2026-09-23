@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import audit
 import datacheck_import
+import fund_store
 import train_number
 import train_recon
 import train_store
@@ -101,6 +102,34 @@ class ImportDecisionIn(BaseModel):
 class ImportApplyIn(BaseModel):
     kind: str
     decisions: list[ImportDecisionIn] = Field(min_length=1)
+
+
+# ---------------------------------------------------------------- v1.1 资金/费用批次
+
+class BatchTripIn(BaseModel):
+    trip_no: str
+    allocated_amount: Any | None = None
+
+
+class FundBatchCreateIn(BaseModel):
+    """资金/费用批次登记契约（多对多）。"""
+    batch_type: str
+    total_amount: Any
+    paid_at: str = ""
+    fund_purpose: str = "预付运费"
+    counterparty: str = ""
+    cost_category: str | None = None
+    trips: list[BatchTripIn] = Field(min_length=1)
+    remark: str = ""
+
+
+class AllocationIn(BaseModel):
+    amount: Any | None = None
+
+
+class ParticipatesIn(BaseModel):
+    participates: bool
+    reason: str
 
 
 def _dc_user(user: dict = Depends(require_roles(*_DATACHECK_ROLES))) -> dict:
@@ -447,3 +476,80 @@ def dc_import_template(kind: str, user: dict = Depends(_dc_user)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition":
                  f"attachment; filename*=UTF-8''{quote(filename)}"})
+
+
+# ============================================================================
+# v1.1 资金/费用批次路由（多对多关联；权限同 datacheck：finance+admin）
+# ============================================================================
+
+def _fund_error(exc: Exception):
+    if isinstance(fund_store.FundStoreError):
+        raise HTTPException(status_code=422, detail=str(exc))
+    raise exc
+
+
+@router.get("/fund-batches")
+def dc_list_fund_batches(batch_type: str = "", user: dict = Depends(_dc_user)):
+    """批次列表（含每批次覆盖核对结果）。"""
+    return {"batches": fund_store.list_batches(batch_type or None)}
+
+
+@router.get("/fund-batches/{batch_id}")
+def dc_get_fund_batch(batch_id: str, user: dict = Depends(_dc_user)):
+    detail = fund_store.get_batch(batch_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"批次不存在：{batch_id}")
+    return detail
+
+
+@router.post("/fund-batches")
+def dc_create_fund_batch(body: FundBatchCreateIn, user: dict = Depends(_dc_user)):
+    """登记资金/费用批次：主档+多趟班列关联（分摊可选）。"""
+    trip_nos = [t.trip_no for t in body.trips]
+    allocations = {t.trip_no: t.allocated_amount for t in body.trips
+                   if t.allocated_amount is not None}
+    try:
+        return fund_store.create_batch(
+            batch_type=body.batch_type, total_amount=body.total_amount,
+            paid_at=body.paid_at or None, fund_purpose=body.fund_purpose,
+            counterparty=body.counterparty, cost_category=body.cost_category,
+            trip_nos=trip_nos, allocations=allocations,
+            remark=body.remark, by=user["username"])
+    except Exception as exc:
+        _fund_error(exc)
+
+
+@router.put("/fund-batches/{batch_id}/trips/{trip_no}/allocation")
+def dc_update_allocation(batch_id: str, trip_no: str, body: AllocationIn,
+                         user: dict = Depends(_dc_user)):
+    try:
+        return fund_store.update_allocation(
+            batch_id, trip_no, body.amount, user["username"])
+    except Exception as exc:
+        _fund_error(exc)
+
+
+@router.put("/fund-batches/{batch_id}/participates")
+def dc_set_participates(batch_id: str, body: ParticipatesIn,
+                        user: dict = Depends(_dc_user)):
+    """人工改写'参与运费核对'标志（需原因，EDIT_FIELD 留痕）。"""
+    try:
+        return fund_store.set_participates(
+            batch_id, body.participates, body.reason, user["username"])
+    except Exception as exc:
+        _fund_error(exc)
+
+
+@router.delete("/fund-batches/{batch_id}")
+def dc_delete_fund_batch(batch_id: str, user: dict = Depends(_dc_user)):
+    try:
+        fund_store.delete_batch(batch_id, user["username"])
+    except Exception as exc:
+        _fund_error(exc)
+    return {"deleted": batch_id}
+
+
+@router.get("/fund-batches/orphan-check/run")
+def dc_orphan_check(user: dict = Depends(_dc_user)):
+    """孤儿/重复登记检测（安全网，非阻断）。"""
+    return fund_store.run_orphan_check()

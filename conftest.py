@@ -51,6 +51,9 @@ def _clean_business_tables():
     db.execute("DELETE FROM train_settlements")
     db.execute("DELETE FROM train_subsidies")
     db.execute("DELETE FROM train_trips")
+    # 数据核对模块v1.1：资金/费用批次（关联先清，主档CASCADE兜底）
+    db.execute("DELETE FROM train_fund_batch_trips")
+    db.execute("DELETE FROM train_fund_batches")
 
 
 @pytest.fixture

@@ -331,6 +331,49 @@ CREATE TABLE IF NOT EXISTS train_prepayments (
 );
 CREATE INDEX IF NOT EXISTS idx_prepays_trip ON train_prepayments (trip_no);
 
+-- ============================================================================
+-- 数据核对模块v1.1：资金/费用批次（多对多关联，任务书_v1.1 + 修订版用途分类）
+-- ============================================================================
+-- 通用批次主档：预付款/费用账单共用一张表，batch_type 区分方向，fund_purpose
+-- 区分具体用途。与 v1 train_prepayments 并存（简单1:1仍可走旧表），
+-- 多趟车共用/多笔钱覆盖多趟车走本批次机制。
+CREATE TABLE IF NOT EXISTS train_fund_batches (
+    batch_id    TEXT PRIMARY KEY,             -- 系统生成，如 BATCH-20250801-PREPAY-01
+    batch_type  VARCHAR(8) NOT NULL
+                CHECK (batch_type IN ('prepay', 'cost')),
+    fund_purpose TEXT NOT NULL DEFAULT '预付运费'
+                 CHECK (fund_purpose IN ('预付运费', '尾款结算', '补贴回款',
+                                        '保证金', '其他')),
+    counterparty TEXT,                       -- 对方主体（脱敏：测试用占位名）
+    cost_category TEXT                       -- batch_type=cost 时：铁路运费/报关费/服务费/其他
+                 CHECK (cost_category IN ('铁路运费', '报关费', '服务费',
+                                         '其他') OR cost_category IS NULL),
+    paid_at      DATE,                       -- 打款日期或开票日期
+    total_amount NUMERIC(14,2) NOT NULL,     -- 唯一权威金额（不由分摊加总倒推）
+    participates_in_freight_recon BOOLEAN NOT NULL DEFAULT TRUE,
+                 -- 是否参与"批次总额 vs 结算合计"覆盖核对；
+                 -- 预付运费/尾款结算=TRUE；补贴回款/保证金=FALSE
+    recon_override_reason TEXT NOT NULL DEFAULT '',
+                 -- 人工改写 participates 默认值的原因（EDIT_FIELD 留痕配套）
+    remark       TEXT NOT NULL DEFAULT '',
+    created_by   VARCHAR(64),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by   VARCHAR(64),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_fund_batches_type ON train_fund_batches (batch_type);
+CREATE INDEX IF NOT EXISTS idx_fund_batches_paid ON train_fund_batches (paid_at);
+
+-- 批次 <-> 班列 多对多关联（allocated_amount 可空：只登记覆盖关系不强求拆分）
+CREATE TABLE IF NOT EXISTS train_fund_batch_trips (
+    id               BIGSERIAL PRIMARY KEY,
+    batch_id          TEXT NOT NULL REFERENCES train_fund_batches (batch_id) ON DELETE CASCADE,
+    trip_no           TEXT NOT NULL,         -- 正式或预估编号（同v1预付口径，不设外键）
+    allocated_amount  NUMERIC(14,2),
+    UNIQUE (batch_id, trip_no)
+);
+CREATE INDEX IF NOT EXISTS idx_fund_batch_trips_trip ON train_fund_batch_trips (trip_no);
+
 -- 补贴测算（1:1；review_status=存疑标记，anomalies=系统检测异常快照）
 CREATE TABLE IF NOT EXISTS train_subsidies (
     trip_no          TEXT PRIMARY KEY REFERENCES train_trips (trip_no) ON DELETE CASCADE,
