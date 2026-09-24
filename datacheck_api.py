@@ -169,15 +169,41 @@ def dc_list_codes(user: dict = Depends(_dc_user)):
 
 
 @router.put("/codes")
-def dc_upsert_code(body: CodeIn, user: dict = Depends(_dc_admin)):
-    """登记/修改缩写（任务书 §一：支持后续增删站点/口岸，不硬编码）。"""
+def dc_upsert_code(body: CodeIn, mode: str = "upsert",
+                   user: dict = Depends(_dc_admin)):
+    """登记/修改缩写（任务书 §一：支持后续增删站点/口岸，不硬编码）。
+
+    mode=create（代码字典维护页"新增"用）：同类别同缩写已存在（不论启用
+    还是停用）→ 422 明确提示，不静默覆盖；
+    默认 upsert：修改名称/排序/停用启用。
+    审计动作按语义区分：新增=DC_CODE_CREATE、停用=DC_CODE_DISABLE、
+    其余修改=DC_CODE_UPDATE（含 before/after）。"""
+    code = str(body.code or "").strip().upper()
+    existing = next((c for c in train_store.list_codes()
+                     if c["category"] == body.category and c["code"] == code),
+                    None)
+    if mode == "create" and existing is not None:
+        state = "启用" if existing.get("active") else "已停用"
+        raise HTTPException(
+            status_code=422,
+            detail=f"{body.category}类别下缩写 {code} 已登记"
+                   f"（{state}，名称：{existing.get('name')}），不能重复登记；"
+                   f"如需修改请用编辑功能。")
     try:
-        row = train_store.upsert_code(body.category, body.code, body.name,
+        row = train_store.upsert_code(body.category, code, body.name,
                                       body.sort, body.active, user["username"])
     except Exception as exc:
         _dc_error(exc)
-    audit.record(user["username"], audit.DC_CODE_UPDATE, "train_code_dict",
-                 f"{body.category}/{body.code}", after=row)
+    if existing is None:
+        action = audit.DC_CODE_CREATE
+    elif existing.get("active") and not body.active:
+        action = audit.DC_CODE_DISABLE
+    else:
+        action = audit.DC_CODE_UPDATE
+    audit.record(user["username"], action, "train_code_dict",
+                 f"{body.category}/{code}",
+                 before=existing if existing is not None else None,
+                 after=row)
     return row
 
 

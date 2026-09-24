@@ -28,7 +28,7 @@ import streamlit as st
 
 import audit
 import auth_service
-from webapp import admin_audit, admin_users, data_check, doc_verify
+from webapp import admin_audit, admin_codes, admin_users, data_check, doc_verify
 from webapp import session
 from webapp.styles import APP_CSS
 
@@ -51,6 +51,7 @@ ROLE_PAGES = {
         ("单据核对", doc_verify.render, "🔍"),
         ("数据核对", data_check.render, "📊"),
         ("用户管理", admin_users.render, "👤"),
+        ("代码字典", admin_codes.render, "🔤"),
         ("操作日志", admin_audit.render, "📜"),
     ],
 }
@@ -145,10 +146,12 @@ def render_home() -> None:
     if role == "admin":
         st.divider()
         st.markdown("##### 管理员快捷入口")
-        c1, c2, _ = st.columns([1, 1, 2])
+        c1, c2, c3, _ = st.columns([1, 1, 1, 2])
         with c1:
             st.page_link(PAGE_USERS, label="用户管理", icon="👤", use_container_width=True)
         with c2:
+            st.page_link(PAGE_CODES, label="代码字典", icon="🔤", use_container_width=True)
+        with c3:
             st.page_link(PAGE_AUDIT, label="操作日志", icon="📜", use_container_width=True)
 
     st.divider()
@@ -167,9 +170,11 @@ role = session.current_role()
 PAGE_DOC = st.Page(doc_verify.render, title="单据核对", icon="🔍", url_path="doc-verify")
 PAGE_DATA = st.Page(data_check.render, title="数据核对", icon="📊", url_path="data-check")
 PAGE_USERS = st.Page(admin_users.render, title="用户管理", icon="👤", url_path="users")
+PAGE_CODES = st.Page(admin_codes.render, title="代码字典", icon="🔤", url_path="codes")
 PAGE_AUDIT = st.Page(admin_audit.render, title="操作日志", icon="📜", url_path="audit")
 ALL_PAGES = {"单据核对": PAGE_DOC, "数据核对": PAGE_DATA,
-             "用户管理": PAGE_USERS, "操作日志": PAGE_AUDIT}
+             "用户管理": PAGE_USERS, "代码字典": PAGE_CODES,
+             "操作日志": PAGE_AUDIT}
 
 pages = [PAGE_HOME] + [ALL_PAGES[name] for name, _, _ in ROLE_PAGES.get(role, [])]
 

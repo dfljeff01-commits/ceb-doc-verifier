@@ -381,3 +381,116 @@ def test_field_edits_audited_with_before_after(dc_users):
     assert trip_rows, [r["object_id"] for r in rows]
     assert trip_rows[0]["before_value"]["value"] == "测试品名"
     assert trip_rows[0]["after_value"]["value"] == "光伏组件"
+
+
+# ---------------------------------------------------------------- 代码字典维护（补充任务）
+
+def test_code_create_mode_rejects_duplicate(dc_users):
+    """新增判重：同类别同缩写已存在（含停用状态）→ 422 明确提示，
+    不静默覆盖（补充任务 §6）。"""
+    h = dc_users["headers"]["admin"]
+    body = {"category": "station", "code": "PW", "name": "平旺（改）",
+            "sort": 9, "active": True}
+    # PW 是种子数据（启用中）：create 模式必须拒绝
+    r = client.put("/datacheck/codes", params={"mode": "create"},
+                   headers=h, json=body)
+    assert r.status_code == 422
+    assert "已登记" in r.json()["detail"]
+
+    # 停用后再 create：仍拒绝（不论启用还是停用状态）
+    client.put("/datacheck/codes", headers=h,
+               json={"category": "station", "code": "PW", "name": "平旺",
+                     "sort": 1, "active": False})
+    r2 = client.put("/datacheck/codes", params={"mode": "create"},
+                    headers=h, json=body)
+    assert r2.status_code == 422
+    # 恢复启用，避免影响其他用例
+    client.put("/datacheck/codes", headers=h,
+               json={"category": "station", "code": "PW", "name": "平旺",
+                     "sort": 1, "active": True})
+
+
+def test_code_audit_actions_distinguished(dc_users):
+    """审计动作区分：新增=DC_CODE_CREATE、停用=DC_CODE_DISABLE、
+    修改=DC_CODE_UPDATE（补充任务 §5）。"""
+    h = dc_users["headers"]["admin"]
+    admin_name = dc_users["names"]["admin"]
+    db.execute("DELETE FROM train_code_dict WHERE category='dest' AND code='MN'")
+    audit.query  # noqa: B018 -- 引用确保模块已加载
+
+    # 新增
+    r = client.put("/datacheck/codes", params={"mode": "create"},
+                   headers=h, json={"category": "dest", "code": "MN",
+                                    "name": "蒙古", "sort": 4, "active": True})
+    assert r.status_code == 200
+    rows = audit.query(username=admin_name, action=audit.DC_CODE_CREATE)
+    assert any(r["object_id"] == "dest/MN" for r in rows)
+
+    # 修改名称/排序（保持启用）
+    client.put("/datacheck/codes", headers=h,
+               json={"category": "dest", "code": "MN", "name": "蒙古国",
+                     "sort": 5, "active": True})
+    rows = audit.query(username=admin_name, action=audit.DC_CODE_UPDATE)
+    assert any(r["object_id"] == "dest/MN" for r in rows)
+
+    # 停用
+    client.put("/datacheck/codes", headers=h,
+               json={"category": "dest", "code": "MN", "name": "蒙古国",
+                     "sort": 5, "active": False})
+    rows = audit.query(username=admin_name, action=audit.DC_CODE_DISABLE)
+    assert any(r["object_id"] == "dest/MN" for r in rows)
+    # 停用审计含 before/after（软删除语义可追溯）
+    row = next(r for r in rows if r["object_id"] == "dest/MN")
+    assert row["before_value"].get("active") is True
+    assert row["after_value"].get("active") is False
+    db.execute("DELETE FROM train_code_dict WHERE category='dest' AND code='MN'")
+
+
+def test_code_format_validation_matches_engine():
+    """网页/引擎校验一致性（补充任务交付要求3）：维护页直接调用
+    train_number.is_valid_code，含连字符/超长/小写一律拒绝。"""
+    import train_number
+    assert train_number.is_valid_code("PW") is True
+    assert train_number.is_valid_code("MZL1") is True
+    # 连字符是编号分隔符，绝不能出现在缩写里
+    assert train_number.is_valid_code("AB-C") is False
+    assert train_number.is_valid_code("工具站") is False   # 非字母数字
+    assert train_number.is_valid_code("ABCDEFGHI") is False  # 超8位
+    # upsert_code 同口径：非法缩写直接报错
+    import pytest
+    with pytest.raises(train_store.TrainStoreError):
+        train_store.upsert_code("station", "AB-C", "测试", by="t")
+
+
+def test_disabled_code_not_in_new_trip_options_but_history_intact(dc_users):
+    """停用语义（补充任务 §3）：软删除——历史编号不受影响，
+    新建班列的编号生成不再接受该缩写。"""
+    h = dc_users["headers"]["finance"]
+    # 先用 KZ 建一趟班列（历史记录）
+    r = client.post("/datacheck/trips", headers=h, json={
+        "dep_date": "2025-09-26", "station_code": "ZD", "port_code": "HGS",
+        "dest_code": "ZY", "train_type": "T"})
+    assert r.status_code == 200
+    historical_no = r.json()["trip_no"]
+
+    # 停用 ZD 发站
+    admin_h = dc_users["headers"]["admin"]
+    client.put("/datacheck/codes", headers=admin_h,
+               json={"category": "station", "code": "ZD", "name": "中鼎",
+                     "sort": 3, "active": False})
+
+    # 历史班列详情仍可读（编号未失效）
+    detail = client.get(f"/datacheck/trips/{historical_no}", headers=h)
+    assert detail.status_code == 200
+
+    # 新建班列：编号生成（load_code_map active_only）不再接受 ZD
+    r2 = client.post("/datacheck/trips", headers=h, json={
+        "dep_date": "2025-09-27", "station_code": "ZD", "port_code": "HGS",
+        "dest_code": "ZY", "train_type": "T"})
+    assert r2.status_code == 422
+    assert "ZD" in r2.json()["detail"]
+
+    # 恢复启用
+    client.put("/datacheck/codes", headers=admin_h,
+               json={"category": "station", "code": "ZD", "name": "中鼎",
+                     "sort": 3, "active": True})

@@ -44,7 +44,9 @@ DC_EST_LOCK = "DC_EST_LOCK"              # 预估编号锁定为正式编号（�
 DC_IMPORT_PREVIEW = "DC_IMPORT_PREVIEW"  # Excel导入差异预览
 DC_IMPORT_APPLY = "DC_IMPORT_APPLY"      # Excel导入确认应用（含覆盖/保留明细）
 DC_SUSPECT_MARK = "DC_SUSPECT_MARK"      # 补贴记录存疑/复核标记
-DC_CODE_UPDATE = "DC_CODE_UPDATE"        # 缩写代码字典登记/修改
+DC_CODE_CREATE = "DC_CODE_CREATE"        # 缩写代码字典新增（代码字典维护页）
+DC_CODE_UPDATE = "DC_CODE_UPDATE"        # 缩写代码字典修改（改名/排序）
+DC_CODE_DISABLE = "DC_CODE_DISABLE"      # 缩写代码字典停用（active=false，软删除）
 DC_CONFIG_UPDATE = "DC_CONFIG_UPDATE"    # 核对阈值等配置修改
 
 ACTION_LABELS = {
@@ -58,6 +60,7 @@ ACTION_LABELS = {
     DC_CREATE_TRIP: "登记班列", DC_EST_LOCK: "预估编号锁定",
     DC_IMPORT_PREVIEW: "导入预览", DC_IMPORT_APPLY: "导入应用",
     DC_SUSPECT_MARK: "存疑标记", DC_CODE_UPDATE: "代码字典更新",
+    DC_CODE_CREATE: "代码字典新增", DC_CODE_DISABLE: "代码字典停用",
     DC_CONFIG_UPDATE: "核对配置修改",
 }
 
