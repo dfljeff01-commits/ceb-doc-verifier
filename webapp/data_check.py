@@ -28,6 +28,7 @@ import streamlit as st
 
 import audit
 import datacheck_import
+import dual_recon
 import fund_store
 import train_store
 from webapp import session
@@ -392,6 +393,53 @@ def dc_fund_participates(batch_id: str, participates: bool,
     return True
 
 
+# ================================================================ v1.1 双表对账
+
+def dc_dual_preview(own_bytes: bytes, own_name: str,
+                    agent_bytes: bytes, agent_name: str) -> dict | None:
+    try:
+        resp = requests.post(
+            f"{API_URL}/datacheck/dual-recon/preview",
+            files={"own_file": (own_name, own_bytes),
+                   "agent_file": (agent_name, agent_bytes)},
+            headers=_headers(), timeout=60)
+        if resp.status_code == 401:
+            session.logout()
+            st.warning("登录状态已过期，请重新登录。")
+            st.rerun()
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            st.error(f"接口返回 {resp.status_code}：{detail}")
+            return None
+        return resp.json()
+    except requests.RequestException:
+        try:
+            result = dual_recon.build_preview(own_bytes, agent_bytes)
+            _safe_audit(audit.DC_IMPORT_PREVIEW, "dual_recon", "preview",
+                        detail=result["stats"])
+            return result
+        except Exception as exc:
+            st.error(str(exc))
+            return None
+
+
+def dc_dual_apply(decisions: list[dict]) -> dict | None:
+    r = _api("POST", "/datacheck/dual-recon/apply", json={"decisions": decisions})
+    if r is not None:
+        return r.json()
+    try:
+        result = dual_recon.apply_preview(decisions, session.current_username())
+        _safe_audit(audit.DC_IMPORT_APPLY, "dual_recon", "apply",
+                    detail=result["counts"])
+        return result
+    except Exception as exc:
+        st.error(str(exc))
+        return None
+
+
 # ================================================================ 展示辅助
 
 def _money(value) -> str:
@@ -449,9 +497,9 @@ def render() -> None:
     st.caption("班列统一编号 · 联运结算与补贴对账（v1）　|　"
                "编号规则：发运日期-发站-口岸-目的地-L/T，同日同线路同类型自动加 -01 后缀")
 
-    tab_query, tab_ledger, tab_register, tab_recon, tab_fund, tab_import = st.tabs(
+    tab_query, tab_ledger, tab_register, tab_recon, tab_fund, tab_dual, tab_import = st.tabs(
         ["🔎 编号查询", "📋 班列台账", "➕ 登记班列", "⚖️ 三方对账",
-         "💰 资金/费用批次", "📥 Excel导入"])
+         "💰 资金/费用批次", "🧮 双表对账", "📥 Excel导入"])
 
     with tab_query:
         _tab_query()
@@ -463,6 +511,8 @@ def render() -> None:
         _tab_recon()
     with tab_fund:
         _tab_fund_batches()
+    with tab_dual:
+        _tab_dual_recon()
     with tab_import:
         _tab_import()
 
@@ -1172,3 +1222,138 @@ def _fund_participates_editor(batch: dict) -> None:
                     st.rerun()
         elif batch.get("recon_override_reason"):
             st.caption(f"历史改写原因：{batch['recon_override_reason']}")
+
+
+# ---------------------------------------------------------------- 🧮 双表对账（Issue #2）
+
+_DUAL_STATUS_LABEL = {
+    "confirmed": "✅ 已确认（合计一致）",
+    "pending": "⚠️ 待确认（合计不一致）",
+    "own_missing": "🔴 己方缺失",
+    "agent_missing": "🔵 联运缺失",
+    "error": "⛔ 解析错误",
+}
+
+
+def _tab_dual_recon() -> None:
+    st.markdown("##### 双表对账导入（己方台账 × 联运公司对账单）")
+    st.caption("上传两份 Excel → 系统按「发运日期+发站+口岸+到站」自动配对 → "
+               "**只以结算合计是否一致判定匹配成败**（科目细项差异如代理费并入"
+               "铁路运费仅为记账口径，展示不报警）→ 已确认行自动入库，"
+               "其余人工处理后入库。到站查不到时请先到管理员的「代码字典」补录。")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        own_file = st.file_uploader("① 己方台账（大同陆港联运费用明细）",
+                                    type=["xlsx"], key="dual_own")
+    with c2:
+        agent_file = st.file_uploader("② 联运公司对账单",
+                                      type=["xlsx"], key="dual_agent")
+    if not (own_file and agent_file):
+        st.info("请同时上传两份文件后点击预览。")
+        return
+    if st.button("🔎 解析并配对预览", type="primary"):
+        st.session_state["dual_preview"] = dc_dual_preview(
+            own_file.getvalue(), own_file.name,
+            agent_file.getvalue(), agent_file.name)
+        st.session_state.pop("dual_decisions", None)
+
+    preview = st.session_state.get("dual_preview")
+    if not preview:
+        return
+    st.info(preview["message"])
+
+    # 未登记站名 → 提示补录
+    unknown = preview.get("unknown_names") or []
+    if unknown:
+        with st.expander(f"⚠️ {len(unknown)} 个站名未在站编表登记（请先补录后重新预览）",
+                         expanded=True):
+            seen = set()
+            for u in unknown:
+                key = (u["category"], u["name"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                cat_label = {"station": "发站", "port": "口岸",
+                             "dest": "到站"}.get(u["category"], u["category"])
+                st.markdown(f"- [{cat_label}] **{u['name']}**"
+                            f"（出现在第{u['row_index']}行）")
+            st.caption("补录入口：管理员 → 代码字典（登记站编与别名后回来重新预览）。")
+
+    # 逐对展示与决策
+    decisions = st.session_state.setdefault("dual_decisions", {})
+    pairs = preview.get("pairs", [])
+    for pair in pairs:
+        status = pair["status"]
+        own = pair.get("own")
+        agent = pair.get("agent")
+        title = _DUAL_STATUS_LABEL.get(status, status)
+        label_bits = []
+        if own:
+            label_bits.append(f"己方 {own.get('dep_date')} {own.get('route_raw') or ''}"
+                              f" 合计 {own.get('total') or '—'}")
+        if agent:
+            label_bits.append(f"联运 {agent.get('dep_date')} "
+                              f"{agent.get('station_name')}-{agent.get('port_name')}"
+                              f"-{agent.get('dest_name')} 合计 {agent.get('total') or '—'}")
+        with st.expander(f"{title}　{'　|　'.join(label_bits) or pair.get('message','')}"):
+            if status == "error":
+                st.error(pair.get("message", ""))
+                continue
+            st.caption(pair.get("message", ""))
+            cbreak = pair.get("category_breakdown")
+            if cbreak:
+                c1b, c2b = st.columns(2)
+                with c1b:
+                    st.markdown("**己方科目**")
+                    for item in cbreak["own"]:
+                        st.markdown(f"- {item['label']}：{item['value'] or '—'}")
+                with c2b:
+                    st.markdown("**联运科目**")
+                    for item in cbreak["agent"]:
+                        st.markdown(f"- {item['label']}：{item['value'] or '—'}")
+                st.caption("科目差异仅为记账口径展示，不影响核对结论。")
+            key = pair.get("match_key") or f"row{own or agent}"
+            if status == "confirmed":
+                st.session_state.setdefault(
+                    f"dual_dec_{key}", "use_agent")
+                decisions[key] = {"match_key": key, "decision": "use_agent",
+                                  "own": own, "agent": agent}
+                st.caption("✅ 将自动入库（无需操作）。")
+            elif status == "pending":
+                choice = st.radio(
+                    "结算合计不一致，以哪方数据入库？",
+                    ["以联运数据为准", "以己方数据为准", "跳过（暂不处理）"],
+                    key=f"dual_dec_{key}")
+                decisions[key] = {
+                    "match_key": key,
+                    "decision": {"以联运数据为准": "use_agent",
+                                 "以己方数据为准": "use_own",
+                                 "跳过（暂不处理）": "skip"}[choice],
+                    "own": own, "agent": agent}
+            else:   # 缺失
+                choice = st.radio(
+                    "处理方式",
+                    ["跳过（先核实）", "按现有侧数据补录入库"],
+                    key=f"dual_dec_{key}")
+                decisions[key] = {
+                    "match_key": key,
+                    "decision": ("skip" if choice.startswith("跳过")
+                                 else ("use_agent" if status == "own_missing"
+                                       else "use_own")),
+                    "own": own, "agent": agent}
+
+    applicable = [d for d in decisions.values() if d.get("decision") != "skip"]
+    if st.button(f"✅ 确认入库（含自动通过，共 {len(applicable)} 条）",
+                 type="primary"):
+        result = dc_dual_apply(list(decisions.values()))
+        if result:
+            st.success(result["message"])
+            for res in result.get("results", []):
+                icon = {"created": "🆕", "updated": "♻️", "skipped": "⏸️",
+                        "error": "⛔"}.get(res["status"], "•")
+                st.markdown(f"- {icon} `{res.get('match_key','')[:40]}`："
+                            f"{res['message']}")
+            st.session_state.pop("dual_preview", None)
+            st.session_state.pop("dual_decisions", None)
+            st.session_state.pop("ledger_trips", None)

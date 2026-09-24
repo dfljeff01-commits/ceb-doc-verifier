@@ -33,16 +33,25 @@ from train_number import TrainNumberError
 # ---------------------------------------------------------------- 种子数据
 
 # 缩写代码字典种子（任务书 §一 已验证的真实缩写；后续增删走 PUT /datacheck/codes）
+# 种子字典（任务书§四：10个高频站点；元组 = category, code, name, sort,
+# aliases(逗号分隔), country）。dest 中 RU/ZY 为国家层兜底（对外班列编号口径），
+# MSK/XLY/XEG/BLS 为具体到站（双表对账精确匹配口径）。
 SEED_CODE_DICT = [
-    # (category, code, name, sort)
-    ("station", "PW", "平旺", 1),
-    ("station", "DT", "大同", 2),
-    ("station", "ZD", "中鼎", 3),
-    ("port", "MZL", "满洲里", 1),
-    ("port", "EL", "二连", 2),
-    ("port", "HGS", "霍尔果斯", 3),
-    ("dest", "RU", "俄罗斯", 1),
-    ("dest", "ZY", "中亚", 2),
+    # 发站（3）
+    ("station", "PW", "平旺", 1, "", "中国"),
+    ("station", "DT", "大同", 2, "", "中国"),
+    ("station", "ZD", "中鼎", 3, "", "中国"),
+    # 口岸（3）
+    ("port", "MZL", "满洲里", 1, "", "中国"),
+    ("port", "EL", "二连", 2, "二连浩特", "中国"),
+    ("port", "HGS", "霍尔果斯", 3, "霍尔果斯口岸", "中国"),
+    # 到站（国家层兜底2 + 具体车站4）
+    ("dest", "RU", "俄罗斯", 1, "俄国", ""),
+    ("dest", "ZY", "中亚", 2, "", ""),
+    ("dest", "MSK", "莫斯科", 3, "Moscow,Москва", "俄罗斯"),
+    ("dest", "XLY", "谢利亚季诺", 4, "Селятино,谢利亚季", "俄罗斯"),
+    ("dest", "XEG", "谢尔盖利", 5, "Сергели,Сергели", "乌兹别克斯坦"),
+    ("dest", "BLS", "别雷拉斯特", 6, "Белый Раст,别雷", "俄罗斯"),
 ]
 
 # 核对阈值种子（任务书 §三：暂定超5%或超5000元触发提示，可配置）
@@ -78,9 +87,14 @@ def seed_refs_if_absent() -> dict:
     with db.connection() as conn:
         with conn.cursor() as cur:
             cur.executemany(
-                """INSERT INTO train_code_dict (category, code, name, sort)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT (category, code) DO NOTHING""",
+                """INSERT INTO train_code_dict
+                       (category, code, name, sort, aliases, country)
+                   VALUES (%s, %s, %s, %s, NULLIF(%s, ''), NULLIF(%s, ''))
+                   ON CONFLICT (category, code) DO UPDATE SET
+                       aliases = COALESCE(train_code_dict.aliases,
+                                          EXCLUDED.aliases),
+                       country = COALESCE(train_code_dict.country,
+                                          EXCLUDED.country)""",
                 SEED_CODE_DICT)
             inserted["codes"] = cur.rowcount
             cur.executemany(
@@ -106,16 +120,17 @@ def load_code_map(active_only: bool = True) -> dict[str, dict[str, str]]:
 
 def list_codes(active_only: bool = False) -> list[dict]:
     rows = db.query(
-        "SELECT category, code, name, sort, active, updated_by, updated_at"
-        " FROM train_code_dict"
+        "SELECT category, code, name, sort, active, aliases, country,"
+        " updated_by, updated_at FROM train_code_dict"
         + (" WHERE active = TRUE" if active_only else "")
         + " ORDER BY category, sort, code")
     return rows
 
 
 def upsert_code(category: str, code: str, name: str, sort: int = 0,
-                active: bool = True, by: str = "") -> dict:
-    """登记/更新缩写（任务书 §一：支持后续增删站点/口岸，不硬编码）。"""
+                active: bool = True, by: str = "", aliases: str = "",
+                country: str = "") -> dict:
+    """登记/更新缩写（任务书§一/§四：支持后续增删站点/口岸及别名，不硬编码）。"""
     if category not in train_number.CODE_CATEGORIES:
         raise TrainStoreError(
             f"字典类别不合法：{category!r}（应为 station/port/dest）")
@@ -127,15 +142,19 @@ def upsert_code(category: str, code: str, name: str, sort: int = 0,
     if not name:
         raise TrainStoreError("名称不能为空")
     db.query(
-        """INSERT INTO train_code_dict (category, code, name, sort, active, updated_by)
-           VALUES (%s, %s, %s, %s, %s, %s)
+        """INSERT INTO train_code_dict (category, code, name, sort, active,
+                                       aliases, country, updated_by)
+           VALUES (%s, %s, %s, %s, %s, NULLIF(%s, ''), NULLIF(%s, ''), %s)
            ON CONFLICT (category, code) DO UPDATE SET
                name = EXCLUDED.name, sort = EXCLUDED.sort,
-               active = EXCLUDED.active, updated_by = EXCLUDED.updated_by,
+               active = EXCLUDED.active, aliases = EXCLUDED.aliases,
+               country = EXCLUDED.country, updated_by = EXCLUDED.updated_by,
                updated_at = now()""",
-        (category, code, name, int(sort), bool(active), by or None))
+        (category, code, name, int(sort), bool(active),
+         str(aliases or ""), str(country or ""), by or None))
     return {"category": category, "code": code, "name": name,
-            "sort": int(sort), "active": bool(active)}
+            "sort": int(sort), "active": bool(active),
+            "aliases": str(aliases or ""), "country": str(country or "")}
 
 
 # ---------------------------------------------------------------- 配置（阈值）

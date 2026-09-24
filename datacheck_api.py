@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import audit
 import datacheck_import
+import dual_recon
 import fund_store
 import train_number
 import train_recon
@@ -138,6 +139,17 @@ def _dc_user(user: dict = Depends(require_roles(*_DATACHECK_ROLES))) -> dict:
 
 def _dc_admin(user: dict = Depends(require_roles(*_DATACHECK_ADMIN_ROLES))) -> dict:
     return user
+
+
+class DualApplyDecisionIn(BaseModel):
+    match_key: str = ""
+    decision: str = "skip"          # use_agent / use_own / skip
+    own: dict | None = None
+    agent: dict | None = None
+
+
+class DualApplyIn(BaseModel):
+    decisions: list[DualApplyDecisionIn] = Field(min_length=1)
 
 
 def _dc_error(exc: Exception):
@@ -579,3 +591,33 @@ def dc_delete_fund_batch(batch_id: str, user: dict = Depends(_dc_user)):
 def dc_orphan_check(user: dict = Depends(_dc_user)):
     """孤儿/重复登记检测（安全网，非阻断）。"""
     return fund_store.run_orphan_check()
+
+
+# ============================================================================
+# Issue #2 双表对账导入（己方台账 × 联运对账单）
+# ============================================================================
+
+@router.post("/dual-recon/preview")
+async def dc_dual_preview(own_file: UploadFile = File(...),
+                          agent_file: UploadFile = File(...),
+                          user: dict = Depends(_dc_user)):
+    """上传两份 Excel → 解析、站编匹配、四状态预览（只读不写库）。"""
+    own_data = await own_file.read()
+    agent_data = await agent_file.read()
+    try:
+        result = dual_recon.build_preview(own_data, agent_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    audit.record(user["username"], audit.DC_IMPORT_PREVIEW, "dual_recon",
+                 "preview", detail=result["stats"])
+    return result
+
+
+@router.post("/dual-recon/apply")
+def dc_dual_apply(body: DualApplyIn, user: dict = Depends(_dc_user)):
+    """按人工决定把双表配对结果写入 train_trips/settlements/prepayments。"""
+    decisions = [d.model_dump() for d in body.decisions]
+    result = dual_recon.apply_preview(decisions, user["username"])
+    audit.record(user["username"], audit.DC_IMPORT_APPLY, "dual_recon",
+                 "apply", detail=result["counts"])
+    return result

@@ -149,6 +149,12 @@ def _render_add(codes: list[dict]) -> None:
                                  placeholder="如 平旺 / 满洲里 / 哈萨克斯坦")
             sort = st.number_input("排序序号（同类别内展示顺序）", min_value=0,
                                    step=1, value=0, key="ca_sort")
+        country = st.text_input("所属国家/地区（到站建议填写；用于双表对账的国家层级兜底匹配）",
+                                key="ca_country",
+                                placeholder="如 俄罗斯 / 乌兹别克斯坦")
+        aliases = st.text_input("别名/写法变体（多个用逗号分隔；联运对账单可能出现的写法）",
+                                key="ca_aliases",
+                                placeholder="如 二连浩特 / Moscow,Москва")
         submitted = st.form_submit_button("➕ 登记缩写", type="primary")
 
     if not submitted:
@@ -177,7 +183,9 @@ def _render_add(codes: list[dict]) -> None:
         return
     ok, msg = dc_put_code({"category": category, "code": code_raw,
                            "name": name.strip(), "sort": int(sort),
-                           "active": True}, mode="create")
+                           "active": True,
+                           "aliases": aliases.strip(),
+                           "country": country.strip()}, mode="create")
     if ok:
         st.success(f"缩写已登记：{category}/{code_raw} = {name.strip()}（已留痕）")
         st.rerun()
@@ -204,6 +212,12 @@ def _render_edit(codes: list[dict]) -> None:
             new_sort = st.number_input("排序序号", min_value=0, step=1,
                                        value=int(current.get("sort") or 0),
                                        key="ce_sort")
+        new_country = st.text_input(
+            "所属国家/地区", value=current.get("country") or "",
+            key="ce_country")
+        new_aliases = st.text_input(
+            "别名/写法变体（逗号分隔）", value=current.get("aliases") or "",
+            key="ce_aliases")
         submitted = st.form_submit_button("💾 保存修改", type="primary")
     if not submitted:
         return
@@ -214,7 +228,9 @@ def _render_edit(codes: list[dict]) -> None:
                            "code": current["code"],
                            "name": new_name.strip(),
                            "sort": int(new_sort),
-                           "active": bool(current.get("active"))})
+                           "active": bool(current.get("active")),
+                           "country": new_country.strip(),
+                           "aliases": new_aliases.strip()})
     if ok:
         st.success(f"已修改 {current['code']}（已留痕）。")
         st.rerun()
@@ -285,6 +301,8 @@ def _render_list(codes: list[dict]) -> None:
             continue
         rows = [{"缩写": c["code"], "中文名称": c["name"],
                  "排序": c.get("sort") or 0,
+                 "国家": c.get("country") or "—",
+                 "别名": c.get("aliases") or "—",
                  "状态": "✅ 启用" if c.get("active") else "⏸️ 已停用",
                  "最后修改人": c.get("updated_by") or "—",
                  "最后修改时间": str(c.get("updated_at") or "—")[:19]}

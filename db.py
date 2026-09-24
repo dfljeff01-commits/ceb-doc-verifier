@@ -243,10 +243,15 @@ CREATE TABLE IF NOT EXISTS train_code_dict (
     name       VARCHAR(64)  NOT NULL,
     sort       INTEGER      NOT NULL DEFAULT 0,
     active     BOOLEAN      NOT NULL DEFAULT TRUE,
+    aliases    TEXT,                        -- 写法变体，逗号分隔（任务书§四）
+    country    VARCHAR(32),                 -- 所属国家/地区层级（兜底匹配）
     updated_by VARCHAR(64),
     updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (category, code)
 );
+-- 存量库升级（幂等）：双表对账模块需要的两列
+ALTER TABLE train_code_dict ADD COLUMN IF NOT EXISTS aliases TEXT;
+ALTER TABLE train_code_dict ADD COLUMN IF NOT EXISTS country VARCHAR(32);
 
 -- 运行配置（三方对账告警阈值等；KISS 单表 KV）
 CREATE TABLE IF NOT EXISTS app_config (
