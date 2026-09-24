@@ -1235,12 +1235,44 @@ _DUAL_STATUS_LABEL = {
 }
 
 
+# ---------------------------------------------------------------- 🧮 双表对账（Issue #2/#3：任务清单式呈现）
+
+_DUAL_STATUS_LABEL = {
+    "confirmed": "✅ 已确认（合计一致）",
+    "pending": "⚠️ 待确认（合计不一致）",
+    "own_missing": "🔴 己方缺失",
+    "agent_missing": "🔵 联运缺失",
+    "unresolved_name": "❓ 站名未登记（待补录）",
+    "error": "⛔ 解析错误",
+}
+
+
+def _train_type_label(row: dict | None) -> str:
+    """临/图标识（Issue#3：10-10 两趟是不同车次，不是重复统计）。"""
+    if not row:
+        return ""
+    t = row.get("train_type")
+    if t == "L":
+        return "（临时L）"
+    if t == "T":
+        return "（图定T）"
+    return ""
+
+
+def _row_brief(side: str, row: dict | None) -> str:
+    if not row:
+        return f"{side}：—"
+    route = row.get("route_raw") or (
+        f"{row.get('station_name','')}-{row.get('port_name','')}"
+        f"-{row.get('dest_name','')}")
+    return (f"{side} {row.get('dep_date','')}{_train_type_label(row)} "
+            f"{route} 合计 {row.get('total') or '—'}")
+
+
 def _tab_dual_recon() -> None:
     st.markdown("##### 双表对账导入（己方台账 × 联运公司对账单）")
-    st.caption("上传两份 Excel → 系统按「发运日期+发站+口岸+到站」自动配对 → "
-               "**只以结算合计是否一致判定匹配成败**（科目细项差异如代理费并入"
-               "铁路运费仅为记账口径，展示不报警）→ 已确认行自动入库，"
-               "其余人工处理后入库。到站查不到时请先到管理员的「代码字典」补录。")
+    st.caption("判定口径：**只看结算合计是否一致**（科目细项差异如代理费并入"
+               "铁路运费，仅展示不报警）。已确认的自动入库；其余按下方任务清单处理。")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1261,12 +1293,42 @@ def _tab_dual_recon() -> None:
     preview = st.session_state.get("dual_preview")
     if not preview:
         return
-    st.info(preview["message"])
 
-    # 未登记站名 → 提示补录
+    pairs = preview.get("pairs", [])
+    stats = preview.get("stats", {})
     unknown = preview.get("unknown_names") or []
-    if unknown:
-        with st.expander(f"⚠️ {len(unknown)} 个站名未在站编表登记（请先补录后重新预览）",
+
+    # ---- 汇总一行（任务清单总览）
+    st.markdown(
+        f'<div style="background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;'
+        f'padding:8px 14px;font-size:13.5px;">'
+        f'✅ 已确认 <b>{stats.get("confirmed", 0)}</b>（无需处理）　'
+        f'⚠️ 金额对不上 <b style="color:#8D6E00;">{stats.get("pending", 0)}</b>　'
+        f'🔴/🔵 只在一方出现 <b style="color:#B71C1C;">'
+        f'{stats.get("own_missing", 0) + stats.get("agent_missing", 0)}</b>　'
+        f'❓ 站名认不出 <b style="color:#B26A00;">{stats.get("unresolved_name", 0)}</b>　'
+        f'⛔ 解析失败 <b>{stats.get("error", 0)}</b></div>',
+        unsafe_allow_html=True)
+
+    decisions = st.session_state.setdefault("dual_decisions", {})
+    key_of = lambda p: p.get("match_key") or (
+        f"idx{p.get('own', {}) and p['own'].get('row_index')}"
+        f"{p.get('agent', {}) and p['agent'].get('row_index')}")
+
+    def _decision_widget(pair: dict, options: list[str], codes: list[str],
+                         default_index: int = 0):
+        key = key_of(pair)
+        choice = st.radio("处理方式", options, key=f"dual_dec_{key}",
+                          horizontal=True, index=default_index)
+        decisions[key] = {"match_key": key,
+                          "decision": codes[options.index(choice)],
+                          "own": pair.get("own"), "agent": pair.get("agent")}
+
+    # ---- 任务①：站名认不出来 → 去代码字典补录（含未登记行 + 其解析错误行）
+    unknown_pairs = [p for p in pairs if p["status"] == "unresolved_name"]
+    if unknown or unknown_pairs:
+        with st.expander(f"❶ 这些站名系统认不出来，请去代码字典补录"
+                         f"（{max(len(unknown), len(unknown_pairs))} 项）",
                          expanded=True):
             seen = set()
             for u in unknown:
@@ -1277,71 +1339,78 @@ def _tab_dual_recon() -> None:
                 cat_label = {"station": "发站", "port": "口岸",
                              "dest": "到站"}.get(u["category"], u["category"])
                 st.markdown(f"- [{cat_label}] **{u['name']}**"
-                            f"（出现在第{u['row_index']}行）")
+                            f"（第{u['row_index']}行）")
+            for pair in unknown_pairs:
+                st.markdown(f"- {pair['message']}")
             st.caption("补录入口：管理员 → 代码字典（登记站编与别名后回来重新预览）。")
 
-    # 逐对展示与决策
-    decisions = st.session_state.setdefault("dual_decisions", {})
-    pairs = preview.get("pairs", [])
-    for pair in pairs:
-        status = pair["status"]
-        own = pair.get("own")
-        agent = pair.get("agent")
-        title = _DUAL_STATUS_LABEL.get(status, status)
-        label_bits = []
-        if own:
-            label_bits.append(f"己方 {own.get('dep_date')} {own.get('route_raw') or ''}"
-                              f" 合计 {own.get('total') or '—'}")
-        if agent:
-            label_bits.append(f"联运 {agent.get('dep_date')} "
-                              f"{agent.get('station_name')}-{agent.get('port_name')}"
-                              f"-{agent.get('dest_name')} 合计 {agent.get('total') or '—'}")
-        with st.expander(f"{title}　{'　|　'.join(label_bits) or pair.get('message','')}"):
-            if status == "error":
-                st.error(pair.get("message", ""))
-                continue
-            st.caption(pair.get("message", ""))
+    # ---- 任务②：金额对不上 → 判断谁的对
+    pending_pairs = [p for p in pairs if p["status"] == "pending"]
+    with st.expander(f"❷ 这些记录金额对不上，请判断谁的对（{len(pending_pairs)} 条）",
+                     expanded=bool(pending_pairs)):
+        if not pending_pairs:
+            st.caption("没有金额不一致的记录。")
+        for pair in pending_pairs:
+            own, agent = pair.get("own"), pair.get("agent")
+            st.markdown(f"**{_row_brief('己方', own)}**")
+            st.markdown(f"**{_row_brief('联运', agent)}**")
+            st.markdown(f"差额：{pair.get('diff') or '—'} 元")
             cbreak = pair.get("category_breakdown")
             if cbreak:
                 c1b, c2b = st.columns(2)
                 with c1b:
-                    st.markdown("**己方科目**")
-                    for item in cbreak["own"]:
-                        st.markdown(f"- {item['label']}：{item['value'] or '—'}")
+                    st.markdown("己方科目：" + "；".join(
+                        f"{i['label']} {i['value'] or '—'}"
+                        for i in cbreak["own"]))
                 with c2b:
-                    st.markdown("**联运科目**")
-                    for item in cbreak["agent"]:
-                        st.markdown(f"- {item['label']}：{item['value'] or '—'}")
-                st.caption("科目差异仅为记账口径展示，不影响核对结论。")
-            key = pair.get("match_key") or f"row{own or agent}"
-            if status == "confirmed":
-                st.session_state.setdefault(
-                    f"dual_dec_{key}", "use_agent")
-                decisions[key] = {"match_key": key, "decision": "use_agent",
-                                  "own": own, "agent": agent}
-                st.caption("✅ 将自动入库（无需操作）。")
-            elif status == "pending":
-                choice = st.radio(
-                    "结算合计不一致，以哪方数据入库？",
-                    ["以联运数据为准", "以己方数据为准", "跳过（暂不处理）"],
-                    key=f"dual_dec_{key}")
-                decisions[key] = {
-                    "match_key": key,
-                    "decision": {"以联运数据为准": "use_agent",
-                                 "以己方数据为准": "use_own",
-                                 "跳过（暂不处理）": "skip"}[choice],
-                    "own": own, "agent": agent}
-            else:   # 缺失
-                choice = st.radio(
-                    "处理方式",
-                    ["跳过（先核实）", "按现有侧数据补录入库"],
-                    key=f"dual_dec_{key}")
-                decisions[key] = {
-                    "match_key": key,
-                    "decision": ("skip" if choice.startswith("跳过")
-                                 else ("use_agent" if status == "own_missing"
-                                       else "use_own")),
-                    "own": own, "agent": agent}
+                    st.markdown("联运科目：" + "；".join(
+                        f"{i['label']} {i['value'] or '—'}"
+                        for i in cbreak["agent"]))
+                st.caption("科目差异仅为记账口径展示，不影响合计核对结论。")
+            _decision_widget(pair,
+                             ["以联运数据为准", "以己方数据为准", "跳过（暂不处理）"],
+                             ["use_agent", "use_own", "skip"])
+            st.divider()
+
+    # ---- 任务③：只在一方出现 → 核实是否漏记
+    missing_pairs = [p for p in pairs
+                     if p["status"] in ("own_missing", "agent_missing")]
+    with st.expander(f"❸ 这些记录只在一方出现，请核实是否漏记（{len(missing_pairs)} 条）",
+                     expanded=bool(missing_pairs)):
+        if not missing_pairs:
+            st.caption("没有单侧记录。")
+        for pair in missing_pairs:
+            if pair["status"] == "own_missing":
+                st.markdown(f"🔴 **缺己方台账**：{_row_brief('联运', pair.get('agent'))}")
+                options = ["按联运数据补录入库", "跳过（先核实）"]
+                codes = ["use_agent", "skip"]
+            else:
+                st.markdown(f"🔵 **缺联运对账单**：{_row_brief('己方', pair.get('own'))}")
+                options = ["按己方数据补录入库", "跳过（先核实）"]
+                codes = ["use_own", "skip"]
+            _decision_widget(pair, options, codes)
+
+    # ---- 任务④：解析失败（真正的格式问题，合计行已过滤）
+    error_pairs = [p for p in pairs if p["status"] == "error"]
+    with st.expander(f"❹ 这些记录系统解析失败，请检查原始表格式（{len(error_pairs)} 条）",
+                     expanded=bool(error_pairs)):
+        if not error_pairs:
+            st.caption("没有解析失败的记录。")
+        for pair in error_pairs:
+            st.markdown(f"- {pair.get('message')}　"
+                        f"({_row_brief('行', pair.get('own') or pair.get('agent'))})")
+
+    # ---- 已确认：默认折叠，只看汇总数（带临/图标识防"重复"误解）
+    confirmed_pairs = [p for p in pairs if p["status"] == "confirmed"]
+    for pair in confirmed_pairs:
+        key = key_of(pair)
+        decisions[key] = {"match_key": key, "decision": "use_agent",
+                          "own": pair.get("own"), "agent": pair.get("agent")}
+    with st.expander(f"✅ 已确认 {len(confirmed_pairs)} 条，无需处理"
+                     "（点开可查看明细）"):
+        for pair in confirmed_pairs:
+            st.markdown(f"- {_row_brief('己方', pair.get('own'))}　"
+                        f"（联运合计 {pair.get('agent_total') or '—'}）")
 
     applicable = [d for d in decisions.values() if d.get("decision") != "skip"]
     if st.button(f"✅ 确认入库（含自动通过，共 {len(applicable)} 条）",

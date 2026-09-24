@@ -219,3 +219,74 @@ def test_apply_pending_requires_explicit_choice():
                   "total": "2581233.31"}}], by="t")
     assert result["counts"]["skipped"] == 1
     assert result["counts"]["created"] == 0
+
+
+# ---------------------------------------------------------------- Issue #3 三个bug回归
+
+def test_sergeevo_region_matching_fixed():
+    """Issue#3 Bug1：中鼎-霍尔果斯-谢尔盖利(己方) vs 中鼎-霍尔果斯-中亚(联运)
+    ——谢尔盖利 country 修正为'中亚'后，国家层兜底应配对为已确认，
+    不得再出现 4 条互不相关的缺失记录。"""
+    own_0809 = _own_row(6, "2025.8.9", "中鼎-霍尔果斯-谢尔盖利", "2025.8.1",
+                        0, 2034027.60, 0, 0, 2034027.60)
+    own_0813 = _own_row(7, "2025.8.13", "中鼎-霍尔果斯-谢尔盖利", "2025.8.1",
+                        0, 2031824.40, 0, 0, 2031824.40)
+    agent_0809 = _agent_row(6, "2025.8.9", "中鼎", "霍尔果斯", "中亚",
+                            2034027.60, 0, 0, 0, 2034027.60)
+    agent_0813 = _agent_row(7, "2025.8.13", "中鼎", "霍尔果斯", "中亚",
+                            2031824.40, 0, 0, 0, 2031824.40)
+    result = _preview([own_0809, own_0813], [agent_0809, agent_0813])
+    assert result["stats"][dual_recon.CONFIRMED] == 2
+    assert result["stats"][dual_recon.OWN_MISSING] == 0
+    assert result["stats"][dual_recon.AGENT_MISSING] == 0
+    # 站编表数据核对
+    xeg = next(c for c in train_store.list_codes() if c["code"] == "XEG")
+    assert xeg["country"] == "中亚"
+
+
+def test_moscow_mixed_note_cleaned_no_double_report():
+    """Issue#3 Bug2：到站"莫斯科混编（电煤/谢利）"清洗后命中莫斯科——
+    只产生一条已确认，不再同时出现 未登记站名警告+解析错误 两条。"""
+    own = _own_row(6, "2025.7.18", "平旺-满洲里-莫斯科混编（电煤/谢利）",
+                   "2025.7.1", 1426003.11, 2793440.46, 0, 0, 2793440.46)
+    result = _preview([own], [AGENT_0718])
+    assert result["stats"][dual_recon.CONFIRMED] == 1
+    assert result["stats"][dual_recon.UNRESOLVED_NAME] == 0
+    assert result["stats"]["error"] == 0
+    assert result["unknown_names"] == []
+    pair = result["pairs"][0]
+    assert pair["own"]["dest_code"] == "MSK"
+
+
+def test_summary_total_rows_skipped():
+    """Issue#3 Bug3：表格末尾"合计"汇总行被静默跳过——
+    不再出现 全空值的解析错误条目。"""
+    own_rows = [OWN_0718,
+                _own_row("合计", "", "", "", 1426003.11, 2738016.76,
+                         34800, 20623.7, 2793440.46)]
+    agent_rows = [AGENT_0718,
+                  _agent_row("合计", "", "", "", "", 0, 0, 0, 0,
+                             2793440.46)]
+    result = _preview(own_rows, agent_rows)
+    assert result["stats"]["error"] == 0
+    assert result["stats"][dual_recon.CONFIRMED] == 1
+    # 汇总行没有作为缺失/错误进入任何状态
+    total_statuses = [p["status"] for p in result["pairs"]]
+    assert "error" not in total_statuses
+
+
+def test_lintu_trips_marked_not_duplicates():
+    """Issue#3 待标注：10-10 临/图两趟车是正常业务——
+    两条已确认记录各自带 train_type（L/T），展示可区分。"""
+    own_lin = _own_row(8, "2025/10/10临", "平旺-满洲里-别雷拉斯特",
+                       "2025.9.29", 0, 2966062, 0, 0, 2966062)
+    own_tu = _own_row(9, "2025/10/10", "平旺-满洲里-别雷拉斯特",
+                      "2025.9.29", 0, 2966062, 0, 0, 2966062)
+    agent_lin = _agent_row(8, "2025/10/10临", "平旺", "满洲里",
+                           "别雷拉斯特", 2966062, 0, 0, 0, 2966062)
+    agent_tu = _agent_row(9, "2025/10/10", "平旺", "满洲里",
+                          "别雷拉斯特", 2966062, 0, 0, 0, 2966062)
+    result = _preview([own_lin, own_tu], [agent_lin, agent_tu])
+    assert result["stats"][dual_recon.CONFIRMED] == 2
+    types = sorted(p["own"]["train_type"] for p in result["pairs"])
+    assert types == ["L", "T"]      # 临/图各自保留，可区分展示

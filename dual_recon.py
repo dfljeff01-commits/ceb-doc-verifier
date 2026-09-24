@@ -23,6 +23,7 @@ from datetime import date
 
 from openpyxl import load_workbook
 
+import train_number
 import train_recon
 import train_store
 from datacheck_import import _norm_header, parse_dep_cell
@@ -33,12 +34,14 @@ CONFIRMED = "confirmed"            # 配对成功且合计一致
 PENDING = "pending"                # 配对成功但合计不一致
 OWN_MISSING = "own_missing"        # 联运有、己方无
 AGENT_MISSING = "agent_missing"    # 己方有、联运无
+UNRESOLVED_NAME = "unresolved_name"  # 站名清洗后仍未登记（去补录，Issue#3 Bug2）
 
 STATUS_LABELS = {
     CONFIRMED: "已确认（合计一致）",
     PENDING: "待确认（合计不一致）",
     OWN_MISSING: "己方缺失",
     AGENT_MISSING: "联运缺失",
+    UNRESOLVED_NAME: "站名未登记（待补录）",
 }
 
 # ---------------------------------------------------------------- 列名别名
@@ -126,6 +129,21 @@ def _locate_headers(ws, alias_map: dict, min_matches: int = 2):
 
 # ---------------------------------------------------------------- 名称→站编
 
+# 站名清洗（Issue#3 Bug2）：真实表里到站常带括号备注/修饰词
+# （如"莫斯科混编（电煤/谢利）"），不清洗会误报未登记
+_PAREN_BLOCK_RE = re.compile(r"[（(【][^）)】]*[）)】]")
+_STATION_NOISE_RE = re.compile(r"混编|混拼|拼车|加开|重复|二次上报")
+
+
+def _clean_station_name(text) -> str:
+    """站名清洗：去括号及括号内内容、去"混编"类修饰词、去首尾分隔符。
+    清洗后再查站编表；仍查不到才归为未登记站名。"""
+    t = str(text or "")
+    t = _PAREN_BLOCK_RE.sub("", t)
+    t = _STATION_NOISE_RE.sub("", t)
+    return t.strip(" \u3000—–—-/，,;；、.。\t\r\n")
+
+
 def _alias_tokens(aliases) -> list[str]:
     if not aliases:
         return []
@@ -199,11 +217,15 @@ def parse_own_table(data: bytes) -> tuple[list[dict], list[dict]]:
             start=data_start):
         values = {field: (row[col] if col < len(row) else None)
                   for col, field in mapping.items()}
-        dep_date, _hint = parse_dep_cell(values.get("dep_date"))
+        dep_date, type_hint = parse_dep_cell(values.get("dep_date"))
+        row_text = "".join(_dec(v) for v in (row or []))
+        # 合计/汇总行（Issue#3 Bug3）：序号列"合计"字样、或无日期且含合计字样/
+        # 无路线信息的行——静默跳过，不进配对也不报解析错误
         if dep_date is None:
-            if any(_dec(v) for v in (row or [])):
-                rows_out.append({"row_index": row_idx,
-                                 "error": "发运日期无法解析（该行跳过）"})
+            if any(k in row_text for k in ("合计", "总计", "小计"))                     or not _dec(values.get("route")):
+                continue
+            rows_out.append({"row_index": row_idx,
+                             "error": "发运日期无法解析（该行跳过）"})
             continue
 
         route_text = _dec(values.get("route"))
@@ -214,10 +236,14 @@ def parse_own_table(data: bytes) -> tuple[list[dict], list[dict]]:
                                       " 发站-口岸-到站 三段"})
             continue
         station_name, port_name, dest_name = parts[:3]
+        # 站名清洗（Issue#3 Bug2）：去括号备注/混编等修饰词后再查站编
+        station_clean = _clean_station_name(station_name)
+        port_clean = _clean_station_name(port_name)
+        dest_clean = _clean_station_name(dest_name)
         unresolved = []
-        st_r = resolve_name(station_name, "station", code_rows)
-        po_r = resolve_name(port_name, "port", code_rows)
-        de_r = resolve_name(dest_name, "dest", code_rows)
+        st_r = resolve_name(station_clean, "station", code_rows)
+        po_r = resolve_name(port_clean, "port", code_rows)
+        de_r = resolve_name(dest_clean, "dest", code_rows)
         for label, cat, name, res in (
                 ("发站", "station", station_name, st_r),
                 ("口岸", "port", port_name, po_r),
@@ -225,10 +251,12 @@ def parse_own_table(data: bytes) -> tuple[list[dict], list[dict]]:
             if res is None:
                 unresolved.append(label)
                 unknown.append({"side": "own", "category": cat,
-                                "name": name, "row_index": row_idx})
+                                "name": _clean_station_name(name),
+                                "row_index": row_idx})
         rec = {
             "row_index": row_idx,
             "dep_date": dep_date.isoformat(),
+            "train_type": type_hint or train_number.TYPE_SCHEDULED,
             "route_raw": route_text,
             "station_name": station_name, "port_name": port_name,
             "dest_name": dest_name,
@@ -265,20 +293,26 @@ def parse_agent_table(data: bytes) -> tuple[list[dict], list[dict]]:
             start=data_start):
         values = {field: (row[col] if col < len(row) else None)
                   for col, field in mapping.items()}
-        dep_date, _hint = parse_dep_cell(values.get("dep_date"))
+        dep_date, type_hint = parse_dep_cell(values.get("dep_date"))
+        row_text = "".join(_dec(v) for v in (row or []))
+        # 合计/汇总行（Issue#3 Bug3）：静默跳过
         if dep_date is None:
-            if any(_dec(v) for v in (row or [])):
-                rows_out.append({"row_index": row_idx,
-                                 "error": "开行日期无法解析（该行跳过）"})
+            if any(k in row_text for k in ("合计", "总计", "小计"))                     or not _dec(values.get("station")):
+                continue
+            rows_out.append({"row_index": row_idx,
+                             "error": "开行日期无法解析（该行跳过）"})
             continue
 
         station_name, port_name, dest_name = (
             _dec(values.get("station")), _dec(values.get("port")),
             _dec(values.get("dest")))
+        station_clean = _clean_station_name(station_name)
+        port_clean = _clean_station_name(port_name)
+        dest_clean = _clean_station_name(dest_name)
         unresolved = []
-        st_r = resolve_name(station_name, "station", code_rows)
-        po_r = resolve_name(port_name, "port", code_rows)
-        de_r = resolve_name(dest_name, "dest", code_rows)
+        st_r = resolve_name(station_clean, "station", code_rows)
+        po_r = resolve_name(port_clean, "port", code_rows)
+        de_r = resolve_name(dest_clean, "dest", code_rows)
         for label, cat, name, res in (
                 ("发站", "station", station_name, st_r),
                 ("口岸", "port", port_name, po_r),
@@ -286,10 +320,12 @@ def parse_agent_table(data: bytes) -> tuple[list[dict], list[dict]]:
             if res is None:
                 unresolved.append(label)
                 unknown.append({"side": "agent", "category": cat,
-                                "name": name, "row_index": row_idx})
+                                "name": _clean_station_name(name),
+                                "row_index": row_idx})
         rec = {
             "row_index": row_idx,
             "dep_date": dep_date.isoformat(),
+            "train_type": type_hint or train_number.TYPE_SCHEDULED,
             "station_name": station_name, "port_name": port_name,
             "dest_name": dest_name,
             "station_code": st_r[0] if st_r else None,
@@ -374,20 +410,20 @@ def build_preview(own_data: bytes, agent_data: bytes) -> dict:
 
     # 坏行（日期/路线解析失败）直接呈现为错误条目
     pairs: list[dict] = []
-    def _bad(row):
-        # 解析失败（日期/路线）或站编未解析的行，都不参与配对
+    def _badness(row):
+        """None=可配对；"unresolved"=站名未登记（去补录组）；"error"=解析失败。"""
         if "error" in row:
-            return True
+            return "error"
         if row.get("unresolved") or not (row.get("station_code")
                                           and row.get("port_code")
                                           and row.get("dest_code")):
-            return True
-        return False
+            return "unresolved"
+        return None
 
-    own_bad = [r for r in own_rows if _bad(r)]
-    agent_bad = [r for r in agent_rows if _bad(r)]
-    own_ok = [r for r in own_rows if not _bad(r)]
-    agent_ok = [r for r in agent_rows if not _bad(r)]
+    own_bad = [r for r in own_rows if _badness(r)]
+    agent_bad = [r for r in agent_rows if _badness(r)]
+    own_ok = [r for r in own_rows if not _badness(r)]
+    agent_ok = [r for r in agent_rows if not _badness(r)]
 
     matched_own, matched_agent = set(), set()
     # 贪心两两配对（含一方国家层兜底）
@@ -442,18 +478,24 @@ def build_preview(own_data: bytes, agent_data: bytes) -> dict:
                 "message": "己方台账有此记录，联运对账单缺失，请核实对方是否漏开。",
             })
     for bad in own_bad + agent_bad:
-        if bad.get("unresolved"):
-            msg = ("站名未在站编表登记："
-                   + "、".join(bad["unresolved"]) + "——请先补录后重新预览。")
+        badness = _badness(bad)
+        if badness == "unresolved":
+            # 未登记站名：只在此处报告一次（Issue#3 Bug2，不再叠加解析错误）
+            pairs.append({
+                "status": UNRESOLVED_NAME, "match_key": "",
+                "own": bad if bad in own_bad else None,
+                "agent": bad if bad in agent_bad else None,
+                "message": "站名未在站编表登记："
+                           + "、".join(bad.get("unresolved") or [])
+                           + "——请到代码字典补录后重新预览。"})
         else:
-            msg = bad.get("error", "行解析失败")
-        pairs.append({"status": "error", "match_key": "",
-                      "own": bad if bad in own_bad else None,
-                      "agent": bad if bad in agent_bad else None,
-                      "message": msg})
+            pairs.append({"status": "error", "match_key": "",
+                          "own": bad if bad in own_bad else None,
+                          "agent": bad if bad in agent_bad else None,
+                          "message": bad.get("error", "行解析失败")})
 
     stats = {CONFIRMED: 0, PENDING: 0, OWN_MISSING: 0,
-             AGENT_MISSING: 0, "error": 0}
+             AGENT_MISSING: 0, UNRESOLVED_NAME: 0, "error": 0}
     for p in pairs:
         stats[p["status"]] = stats.get(p["status"], 0) + 1
 
@@ -461,7 +503,7 @@ def build_preview(own_data: bytes, agent_data: bytes) -> dict:
     message = (
         f"已确认 {stats[CONFIRMED]}，待确认 {stats[PENDING]}，"
         f"己方缺失 {stats[OWN_MISSING]}，联运缺失 {stats[AGENT_MISSING]}，"
-        f"错误 {stats['error']}。")
+        f"站名未登记 {stats[UNRESOLVED_NAME]}，错误 {stats['error']}。")
     if unknown:
         message += f" 另有 {len(unknown)} 个站名未在站编表登记，补录后重新预览。"
     return {"pairs": pairs, "unknown_names": unknown,
@@ -470,7 +512,8 @@ def build_preview(own_data: bytes, agent_data: bytes) -> dict:
 
 def _slim_row(rec: dict) -> dict:
     """配对结果里的行视图（去掉内部辅助字段）。"""
-    keys = ("row_index", "dep_date", "station_name", "port_name", "dest_name",
+    keys = ("row_index", "dep_date", "train_type", "station_name",
+            "port_name", "dest_name",
             "station_code", "port_code", "dest_code", "dest_country",
             "unresolved", "goods_name", "wagon_count",
             "container_40hd", "container_20hd", "teu_total",
