@@ -33,8 +33,15 @@ def _find_real_pdf() -> Path | None:
         return Path(env)
     if _LOCAL_DIR.exists():
         pdfs = sorted(_LOCAL_DIR.glob("*.pdf"))
-        if pdfs:
-            return pdfs[0]
+        if not pdfs:
+            return None
+        # 本测试的基准值（收货人/封印261918/毛重等）实测自基准样本
+        # TKRU4625794-260921-085933；目录里放有其他受控运单（如换封后的
+        # 260925导出，供 test_waybill_check 用）时仍优先取基准样本。
+        for p in pdfs:
+            if p.name.startswith("TKRU4625794-260921"):
+                return p
+        return pdfs[0]
     return None
 
 

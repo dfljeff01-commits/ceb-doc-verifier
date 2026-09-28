@@ -33,6 +33,7 @@ COPY verification_engine.py risk_model.py semantic.py doc_contract.py llm_layer.
      db.py auth_service.py audit.py init_db.py migrate_json_to_pg.py \
      field_extraction.py fund_recon.py fund_store.py dual_recon.py \
      train_number.py train_recon.py train_store.py \
+     waybill_extract.py \
      datacheck_api.py datacheck_import.py api_deps.py ./
 # 网页端（webapp 双入口：登录 + 单据核对/数据核对/用户管理/操作日志）
 COPY webapp/ webapp/

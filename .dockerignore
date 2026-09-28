@@ -18,3 +18,6 @@ reports/
 evaluation_set_calibration/
 .pytest_cache/
 docker-compose*.yml
+
+# 真实单据受控副本（含客户敏感信息）：绝不进镜像，同 .gitignore 口径
+sample_pdfs/_real/

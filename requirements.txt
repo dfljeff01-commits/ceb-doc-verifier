@@ -9,6 +9,10 @@ python-multipart==0.0.32
 qrcode==8.2
 pdfplumber==0.11.10
 pymupdf==1.28.2
+# 运单核对模块（Issue #4 任务二）：订车系统加密PDF运单的空密码解密
+# （与 pdfplumber 配合，见 waybill_extract.py；缺失时未加密运单仍可解析，
+#  加密运单会按"文件无法解析"计异常）
+pikepdf==9.11.0
 # 单据类型规则知识库 doc_rules.yaml 的解析依赖（任务书问题三；缺失时
 # doc_rules 回退内置默认规则，引擎仍可运行）
 pyyaml==6.0.3

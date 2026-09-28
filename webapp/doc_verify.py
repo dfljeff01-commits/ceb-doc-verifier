@@ -33,7 +33,7 @@ import mobile_store
 import pdf_ingest
 import upload_wizard
 from llm_endpoint import resolve_endpoint
-from webapp import session
+from webapp import session, waybill_check
 from webapp.api_client import (API_URL, api_healthy, fetch_batch_full,
                                run_verification_effective)
 
@@ -911,6 +911,20 @@ def render_recent_batches() -> None:
 
 
 def render() -> None:
+    """单据核对模块页签入口（Issue #4 任务二）。
+
+    页签一：单证智能核验（原有全部功能，_render_doc_verify 原样保留）；
+    页签二：运单核对（车底号/铅封号，waybill_check 页）。
+    原有函数体未做任何缩进/逻辑改动，只换名，降低回归风险。
+    """
+    tab_verify, tab_waybill = st.tabs(["🔎 单证智能核验", "🚋 运单核对（车底号/铅封号）"])
+    with tab_verify:
+        _render_doc_verify()
+    with tab_waybill:
+        waybill_check.render()
+
+
+def _render_doc_verify() -> None:
     st.markdown(APP_CSS, unsafe_allow_html=True)
 
     st.title("🚂 中欧班列单证智能核验")
