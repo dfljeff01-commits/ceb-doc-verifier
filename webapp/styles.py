@@ -3,14 +3,21 @@
 
 APP_CSS = """
 <style>
+/* 品牌色板（P1-2）：全站强调色只有一处来源，与 config.toml 的 [theme] 一致 */
+:root {
+    --ceb-brand: #0B5394;      /* 主强调色：主按钮/选中态/链接 */
+    --ceb-brand-soft: #EFF6FF;  /* 强调色浅底（选中卡片背景） */
+    --ceb-muted: #6B7280;       /* 次要文字（对白底 4.8:1，满足 WCAG AA） */
+    --ceb-border: #E5E7EB;      /* 常规描边 */
+}
 /* 来源选择：radio 卡片化（P0 首屏操作入口） */
 div[data-testid="stRadio"] label {
-    border: 1.5px solid #E5E7EB; border-radius: 12px; padding: 12px 16px;
+    border: 1.5px solid var(--ceb-border); border-radius: 12px; padding: 12px 16px;
     background: #FFFFFF; margin: 2px 0; transition: all .12s ease; cursor: pointer;
 }
-div[data-testid="stRadio"] label:hover { border-color: #94A3B8; }
+div[data-testid="stRadio"] label:hover { border-color: var(--ceb-muted); }
 div[data-testid="stRadio"] label:has(input:checked) {
-    border: 2px solid #0B5394; background: #EFF6FF;
+    border: 2px solid var(--ceb-brand); background: var(--ceb-brand-soft);
 }
 /* 来源选择按钮组（与radio等价的备选形态） */
 div[data-testid="stButton"] > button { border-radius: 10px; }
@@ -18,11 +25,12 @@ div[data-testid="stButton"] > button { border-radius: 10px; }
 .ceb-step { display:flex; gap:6px; margin:2px 0 14px; flex-wrap:wrap; }
 .ceb-step span {
     display:inline-flex; align-items:center; gap:6px; font-size:12.5px;
-    padding:6px 13px; border-radius:999px; border:1px solid #E5E7EB;
-    color:#6B7280; background:#F9FAFB; font-weight:600;
+    padding:6px 13px; border-radius:999px; border:1px solid var(--ceb-border);
+    color:var(--ceb-muted); background:#F9FAFB; font-weight:600;
 }
 .ceb-step span.done { color:#1B5E20; background:#E8F5E9; border-color:#A5D6A7; }
-.ceb-step span.cur { color:#0B5394; background:#EFF6FF; border-color:#0B5394;
+.ceb-step span.cur { color:var(--ceb-brand); background:var(--ceb-brand-soft);
+    border-color:var(--ceb-brand);
     box-shadow:0 1px 6px #0B539433; }
 /* 问题卡片（FAIL/WARNING） */
 .ceb-problem { border-radius:12px; padding:12px 16px; margin:10px 0;
