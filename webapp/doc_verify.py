@@ -252,7 +252,7 @@ def render_document_groups(verification: dict) -> None:
     if not groups:
         return
 
-    st.markdown("###### 按单据查看问题（每份单据的问题、字段与修改建议）")
+    st.markdown("#### 按单据查看问题（每份单据的问题、字段与修改建议）")
 
     def _issue_card(issue: dict) -> None:
         meta = STATUS_META.get(issue["status"], STATUS_META[STATUS_WARNING])
@@ -317,7 +317,7 @@ def render_detail_section(results: list) -> None:
     problems = [r for r in sort_results_by_severity(results) if r["status"] != STATUS_PASS]
     passes = [r for r in results if r["status"] == STATUS_PASS]
 
-    st.markdown("###### 核验明细")
+    st.markdown("#### 核验明细")
     if problems:
         st.markdown(
             f'<span style="font-size:13px;color:#6B7280;">发现 <b style="color:#B71C1C;">'
@@ -860,7 +860,7 @@ def render_recognition_summary(batch: dict, documents: list) -> None:
         for field in summary["open_fields"]:
             open_items.append((title, doc_contract.FIELD_LABELS_ZH.get(field, field),
                                doc_contract.field_status(doc, field)))
-    st.markdown("###### 🔎 识别状态（系统是否找到字段）")
+    st.markdown("### 🔎 识别状态（系统是否找到字段）")
     st.markdown(
         f'<div style="background:#F9FAFB;border:1px solid #E5E7EB;border-radius:12px;'
         f'padding:10px 16px;font-size:13.5px;line-height:1.9;">'
@@ -1050,7 +1050,7 @@ def _render_doc_verify() -> None:
 
     # 侧边栏：功能入口与使用指引（P1：入口整理，不再承担来源选择主交互）
     with st.sidebar:
-        st.header("🧭 使用指引")
+        st.subheader("🧭 使用指引")
         st.markdown(
             "**上传模式（向导式）**\n\n"
             "① 声明单据构成　→　② 逐类型上传（多单据PDF自动拆分）　→　"
@@ -1145,7 +1145,7 @@ def _render_doc_verify() -> None:
     render_ai_reasoning(verification["results"], edited_documents)
 
     # 第四步：生成整改材料（P1 分组导航）
-    st.markdown("###### 4️⃣ 生成整改材料")
+    st.markdown("### 4️⃣ 生成整改材料")
     render_email_generator(verification, edited_documents)
     # 对话助手收进默认折叠的展开器：chat_input 挂载时会自动聚焦并把页面滚到底部，
     # 折叠后首屏保持在顶部；用户点开时再聚焦正合适。
