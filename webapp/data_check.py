@@ -97,7 +97,7 @@ def _api(method: str, path: str, **kwargs):
 
 
 def _fallback_note() -> None:
-    st.caption("⚠️ 核验API不可用，当前为进程内直连模式（操作已在本地补记审计）。")
+    st.caption("⚠️ 在线核验服务未连接，当前在本机完成核对；操作留痕不受影响。")
 
 
 def _safe_audit(action, object_type, object_id, **kw) -> None:
@@ -451,6 +451,27 @@ def _money(value) -> str:
         return str(value)
 
 
+# 三方对账的三个100%口径字段（与 train_recon.three_way_check 的入参一致）
+_THREE_WAY_VALUE_FIELDS = ("dt_supply_100", "ly_advance_100", "auth_confirm_100")
+
+
+def _threeway_status(t: dict) -> str:
+    """三方对账状态列：三方金额都已录入才允许"一致/需关注"判定；
+    缺任一方=尚未录入完整数据，用中性占位——空数据绝不能显示 ✅
+    （空≠核对通过，防"假阳性确认"，与Issue #3合计行误判同类风险；
+    Issue #5 Bug3回归覆盖）。"""
+    if any(t.get(f) in (None, "") for f in _THREE_WAY_VALUE_FIELDS):
+        return "— 尚未录入"
+    return "❌ 需人工关注" if (t.get("three_way") or {}).get("flag") else "✅"
+
+
+def _pair_icon(pair: dict) -> str:
+    """差异明细对比图标：两值都有才给 ✅/❌，缺值给中性占位（同上口径）。"""
+    if (pair.get("a_value") in (None, "") or pair.get("b_value") in (None, "")):
+        return "—"
+    return "❌" if pair.get("flag") else "✅"
+
+
 def _num_input(label: str, key: str, value=None) -> float | None:
     """金额输入：空=未填写（None），不强制必填（任务书：允许字段暂缺）。"""
     text = st.text_input(label, value="" if value in (None, "") else str(value),
@@ -769,7 +790,7 @@ def _edit_subsidy(trip_no: str, detail: dict) -> None:
     if subsidy.get("diff_reason"):
         st.info(f"预测差额原因：{subsidy['diff_reason']}")
     elif subsidy.get("forecast_diff") not in (None, ""):
-        st.warning("⚠️ 已填写预测补贴差额但未填写原因分析（任务书要求提示“未填写原因”）。")
+        st.warning("⚠️ 已填写预测补贴差额但未填写原因分析，请补充差异原因后再确认。")
 
     with st.form("subsidy_form", border=True):
         amounts = {}
@@ -919,7 +940,6 @@ def _tab_recon() -> None:
     dup = data.get("duplicate_flags", {})
     rows = []
     for t in trips:
-        tw = t.get("three_way") or {}
         review = t.get("review_status") or "normal"
         rows.append({
             "班列编号": t["trip_no"], "发运日期": str(t["dep_date"]),
@@ -927,8 +947,8 @@ def _tab_recon() -> None:
             "大同供应链(100%)": _money(t.get("dt_supply_100")),
             "联运公司(100%)": _money(t.get("ly_advance_100")),
             "上级拨付(100%)": _money(t.get("auth_confirm_100")),
-            "三方一致": "❌ 需人工关注" if tw.get("flag") else "✅",
-            "重复值提示": "⚠️ 有" if t["trip_no"] in dup else "",
+            "三方一致": _threeway_status(t),
+            "重复值提示": "⚠️ 有" if t["trip_no"] in dup else "—",
             "复核状态": REVIEW_STATUS_LABELS.get(review, review),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -941,7 +961,7 @@ def _tab_recon() -> None:
         for t in flagged:
             with st.expander(f"{t['trip_no']}（{t['dep_date']}）"):
                 for pair in t["three_way"]["pairs"]:
-                    icon = "❌" if pair["flag"] else "✅"
+                    icon = _pair_icon(pair)
                     st.markdown(
                         f"- {icon} {pair['a_label']} {_money(pair['a_value'])} "
                         f"vs {pair['b_label']} {_money(pair['b_value'])}"
@@ -959,7 +979,7 @@ def _tab_recon() -> None:
 # ---------------------------------------------------------------- 📥 Excel导入
 
 def _tab_import() -> None:
-    st.markdown("从 Excel 批量导入（任务书 §五）。流程：**下载模板/准备文件 → "
+    st.markdown("从 Excel 批量导入。流程：**下载模板/准备文件 → "
                 "上传预览差异 → 逐行选择 覆盖/保留 → 确认应用**。"
                 "系统绝不静默覆盖已有记录。")
     kind = st.radio("导入类别", ["trip", "subsidy"],

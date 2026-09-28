@@ -34,7 +34,7 @@ import pdf_ingest
 import upload_wizard
 from llm_endpoint import resolve_endpoint
 from webapp import session, waybill_check
-from webapp.api_client import (API_URL, api_healthy, fetch_batch_full,
+from webapp.api_client import (api_healthy, fetch_batch_full,
                                run_verification_effective)
 
 from verification_engine import (
@@ -886,7 +886,7 @@ def render_recognition_summary(batch: dict, documents: list) -> None:
 def render_recent_batches() -> None:
     """库内近期批次一览（PostgreSQL）：网页向导批次与App批次同库可见，
     在"手机拍摄批次"模式输入编号即可查看完整报告。"""
-    with st.expander("🗂️ 库内近期批次（PostgreSQL，含网页上传与App现场上传）", expanded=False):
+    with st.expander("🗂️ 库内近期批次（含网页上传与App现场上传）", expanded=False):
         try:
             rows = mobile_store.recent(10)
         except Exception as exc:
@@ -924,6 +924,41 @@ def render() -> None:
         waybill_check.render()
 
 
+# 单证来源选项（模块级常量，供 _source_mode_radio 与回归测试共用）
+SOURCE_SAMPLE = "📁 示例批次（3组预置模拟数据，一键加载，推荐先看）"
+SOURCE_UPLOAD = "📎 上传PDF单证（向导式：声明构成→上传拆分→逐份确认→核验）"
+SOURCE_MOBILE = "📱 手机拍摄批次（输入App批次编号，查看现场上传的完整报告）"
+SOURCE_MODE_OPTIONS = [SOURCE_SAMPLE, SOURCE_UPLOAD, SOURCE_MOBILE]
+
+# 来源选择的普通session键。Streamlit在切页（组件卸载）时会连同显式key一起
+# 清理组件状态（1.64实测，test_issue5_fixes.py 覆盖），普通键不受影响——
+# 选择值必须落在普通键，否则"切页→切回"后来源选择被静默重置（Issue #5 Bug1）。
+SOURCE_MODE_STATE_KEY = "ceb_source_mode"
+
+
+def _source_mode_radio() -> str:
+    """渲染"选择单证来源"单选，并把选择持久化到普通session键。"""
+    prev = st.session_state.get(SOURCE_MODE_STATE_KEY)
+    index = SOURCE_MODE_OPTIONS.index(prev) if prev in SOURCE_MODE_OPTIONS else 0
+    chosen = st.radio(
+        "第一步 · 选择单证来源",
+        SOURCE_MODE_OPTIONS,
+        index=index,
+        label_visibility="collapsed",
+        horizontal=True,
+    )
+    st.session_state[SOURCE_MODE_STATE_KEY] = chosen
+    return chosen
+
+
+def _mobile_batch_unavailable() -> None:
+    """手机批次服务不可用提示（业务口径，不暴露启动命令/技术组件）。"""
+    if not api_healthy():
+        st.warning("手机批次的完整报告保存在核验服务端，当前网页无法连接核验服务。"
+                   "请稍后重试，或联系管理员确认核验服务已启动。")
+        st.stop()
+
+
 def _render_doc_verify() -> None:
     st.markdown(APP_CSS, unsafe_allow_html=True)
 
@@ -932,17 +967,7 @@ def _render_doc_verify() -> None:
     st.info(SCENE_SENTENCE, icon="🎯")
 
     # ---------------- 第一步：选择单证来源（P0 卡片式入口） ----------------
-    SOURCE_SAMPLE = "📁 示例批次（3组预置模拟数据，一键加载，推荐先看）"
-    SOURCE_UPLOAD = "📎 上传PDF单证（向导式：声明构成→上传拆分→逐份确认→核验）"
-    SOURCE_MOBILE = "📱 手机拍摄批次（输入App批次编号，查看现场上传的完整报告）"
-    source_mode = st.radio(
-        "第一步 · 选择单证来源",
-        [SOURCE_SAMPLE, SOURCE_UPLOAD, SOURCE_MOBILE],
-        index=0,
-        key="source_mode",
-        label_visibility="collapsed",
-        horizontal=True,
-    )
+    source_mode = _source_mode_radio()
 
     _mode_upload = source_mode.startswith("📎")
     _mode_mobile = source_mode.startswith("📱")
@@ -981,10 +1006,7 @@ def _render_doc_verify() -> None:
 
     _mobile_record = None
     if _mode_mobile:
-        if not api_healthy():
-            st.warning("手机批次的完整报告保存在核验服务端的 PostgreSQL 数据库中，"
-                       "请先启动后端：`uvicorn api:app --host 0.0.0.0 --port 8000`。")
-            st.stop()
+        _mobile_batch_unavailable()
         _default_mobile_id = st.query_params.get("mobile_batch", "")
         mobile_id = st.text_input(
             "输入手机App上传后显示的批次编号（形如 MB-20260920-143001-8A3C）",
@@ -1000,8 +1022,8 @@ def _render_doc_verify() -> None:
                 st.warning("登录状态已过期，请重新登录。")
                 st.rerun()
             if _resp.status_code == 404:
-                st.error(f"未找到批次 {mobile_id} 的核验记录——请核对编号，并确认App连接的是"
-                         f"同一台后端（当前 {API_URL}）。")
+                st.error(f"未找到批次 {mobile_id} 的核验记录——请核对编号后重试；"
+                         f"若持续出现，请联系管理员确认该批次已上传成功。")
                 st.stop()
             _resp.raise_for_status()
             _mobile_record = _resp.json()
@@ -1038,16 +1060,11 @@ def _render_doc_verify() -> None:
             "**手机批次模式**\n\n"
             "现场App拍照上传 → 记下批次编号 → 在此输入查看完整报告")
         st.divider()
-        st.header("🔗 功能入口")
-        st.markdown(
-            f"- [核验API文档（Swagger）]({API_URL}/docs)\n"
-            f"- [API健康检查]({API_URL}/health)")
         st.caption("📱 Android App：现场拍照即传+速查（电脑端是大脑、手机端是触手），"
-                   "完整处理与深度分析在本网页完成。见 mobile_app/INSTALL.md"
-                   "（扫码分发：python serve_apk.py）；网页端建议 PC 浏览。")
+                   "完整处理与深度分析在本网页完成；安装包请联系管理员获取。"
+                   "网页端建议使用 PC 浏览器。")
         st.divider()
-        st.caption("初级版 v2.0 · PostgreSQL存储 · 登录鉴权 · 操作留痕 ·"
-                   " 规则引擎 + 风险评分 + 语义比对+关键实体守卫 + LLM协同")
+        st.caption("内部系统 · 数据保存于公司内网服务器 · 全程操作留痕")
 
     # ---------------- 向导式上传模式（任务书问题二：声明→上传拆分→逐份确认→核验） ----------------
 
@@ -1096,9 +1113,9 @@ def _render_doc_verify() -> None:
             _persist_web_batch(effective_batch, verification)
     summary = verification["summary"]
     st.caption("🔌 核验通道：" + (
-        f"FastAPI 服务（{API_URL}）—— 前后端分离形态" if verify_mode == "api"
-        else "手机批次（读取API服务端持久化的完整核验报告）" if verify_mode == "api-store"
-        else "进程内直连（未检测到核验API服务，启动 `uvicorn api:app --port 8000` 可切换为API形态"))
+        "在线核验服务" if verify_mode == "api"
+        else "手机批次（读取服务端保存的完整核验报告）" if verify_mode == "api-store"
+        else "本机直连（在线核验服务未连接，核验在本网页完成，结果不受影响）"))
 
     # 识别状态摘要（与核验结论分离，P1任务书B2-4）
     render_recognition_summary(batch, edited_documents)

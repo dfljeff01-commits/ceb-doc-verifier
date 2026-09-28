@@ -136,7 +136,7 @@ def render_home() -> None:
             '<div class="d">班列统一编号生成与查询（一键复制）→ 联运费用结算/预付款/实付核对 → '
             '补贴测算与三方对账 → Excel差异导入。<br>'
             '<span style="color:#94A3B8;">编号规则：发运日期-发站-口岸-目的地-L/T；'
-            'v1范围不含客户报价/客户预付款/票据流（待v2任务书）。</span></div>'
+            '客户报价、客户预付款与票据管理不在当前版本范围内。</span></div>'
             '</div>', unsafe_allow_html=True)
         if role in ("finance", "admin"):
             st.page_link(PAGE_DATA, label="进入数据核对 →", icon="📊", use_container_width=True)

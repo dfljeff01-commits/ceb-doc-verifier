@@ -35,11 +35,11 @@ div[data-testid="stButton"] > button { border-radius: 10px; }
 .ceb-mini { border-radius:10px; padding:10px 14px; text-align:center; }
 .ceb-mini .v { font-size:26px; font-weight:800; line-height:1.2; }
 .ceb-mini .k { font-size:12px; color:#6B7280; font-weight:600; }
-/* 隐藏Streamlit自带的开发者工具栏/Deploy按钮（任务书问题五；
-   与 .streamlit/config.toml 的 toolbarMode="viewer" 双保险） */
+/* 隐藏Streamlit自带的开发者工具栏/Deploy按钮（与 .streamlit/config.toml 的
+   toolbarMode="viewer" 双保险） */
 [data-testid="stToolbar"] { display: none !important; }
 [data-testid="stStatusWidget"] { display: none !important; }
-/* 按单据分组的分层结果卡片（任务书问题四） */
+/* 按单据分组的分层结果卡片 */
 .ceb-docgroup { border:1px solid #E5E7EB; border-radius:12px; padding:10px 14px;
     margin:8px 0; background:#FFFFFF; }
 .ceb-docgroup .hd { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }

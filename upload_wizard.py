@@ -78,17 +78,42 @@ def _file_sig(name: str, data: bytes) -> str:
     return f"{name}:{hashlib.sha256(data).hexdigest()[:16]}"
 
 
-def _prune_removed_files(current_sigs: set) -> None:
-    """上传控件里被移除的文件：联动清理其缓存与派生状态。"""
-    stored = st.session_state.get("wiz_files") or {}
-    for sig in list(stored.keys()):
-        if sig not in current_sigs:
-            stored.pop(sig, None)
-            for key in list(st.session_state.keys()):
-                if key.startswith((f"wiz_pg::{sig}::", f"wiz_gt::{sig}::",
-                                   f"wiz_gn::{sig}", f"wiz_ok::{sig}::")):
-                    del st.session_state[key]
-    st.session_state["wiz_files"] = stored
+# 切页（组件卸载）时Streamlit会清理组件状态（含显式key，1.64实测）——
+# 第2步"份数/逐页归属/类型纠正"的组件选择必须镜像到普通session键，
+# 切回时回填，否则用户的人工调整会被静默重置（Issue #5 Bug1回归覆盖）。
+_MIRRORED_PREFIXES = ("wiz_gn::", "wiz_pg::", "wiz_gt::")
+_MIRROR_SUFFIX = "#saved"
+
+
+def restore_wizard_widgets() -> None:
+    """渲染前回填：组件键已被清理时，从普通镜像键恢复上次的值。"""
+    for key, val in list(st.session_state.items()):
+        if key.endswith(_MIRROR_SUFFIX):
+            orig = key[: -len(_MIRROR_SUFFIX)]
+            if orig.startswith(_MIRRORED_PREFIXES) and orig not in st.session_state:
+                st.session_state[orig] = val
+
+
+def mirror_wizard_widgets() -> None:
+    """渲染后同步：把向导组件当前值镜像到普通session键（普通键切页不丢）。"""
+    for key, val in list(st.session_state.items()):
+        if key.startswith(_MIRRORED_PREFIXES) and not key.endswith(_MIRROR_SUFFIX):
+            st.session_state[key + _MIRROR_SUFFIX] = val
+
+
+def _drop_file_state(sig: str) -> None:
+    """显式移除一份文件：清解析缓存引用与全部派生状态（含镜像键），
+    并记入 wiz_removed——上传控件里若仍选中该文件，不再自动加回。"""
+    files_state = st.session_state.get("wiz_files") or {}
+    files_state.pop(sig, None)
+    st.session_state["wiz_files"] = files_state
+    removed: set = st.session_state.setdefault("wiz_removed", set())
+    removed.add(sig)
+    for key in list(st.session_state.keys()):
+        if key.startswith((f"wiz_pg::{sig}::", f"wiz_gt::{sig}::",
+                           f"wiz_gn::{sig}", f"wiz_ok::{sig}::",
+                           f"wiz_fm::{sig}::")):
+            del st.session_state[key]
 
 
 # ---------------------------------------------------------------- 步骤指示器
@@ -117,6 +142,12 @@ def _step1_composition() -> None:
                "不再判为重复提交。")
     st.session_state.setdefault(
         "wiz_composition", {t: 1 for t in COMPOSITION_ORDER})
+    # 切页后 wiz_comp::* 组件键会被Streamlit清理（数字输入回落到默认0），
+    # 从普通键 wiz_composition 回填申报份数，避免"切页→切回"申报被清零
+    # （普通键由下方渲染逻辑持续回写，两处口径一致，Issue #5 Bug1）。
+    saved = st.session_state.get("wiz_composition") or {}
+    for t in COMPOSITION_ORDER:
+        st.session_state.setdefault(f"wiz_comp::{t}", int(saved.get(t, 0)))
 
     preset_cols = st.columns([1.2] + [2] * len(PRESETS))
     with preset_cols[0]:
@@ -212,7 +243,10 @@ def _step2_upload() -> None:
                "自动拆分；拆分结果需在本页确认，边界不确定时会给出逐页归属调整。")
     composition = _wkey("wiz_composition") or {}
     files_state = st.session_state.setdefault("wiz_files", {})
-    uploaded_sigs: set = set()
+    # 上传控件的值在切页时会被Streamlit清空，不能作为"已上传"的依据；
+    # 已解析文件一律以 wiz_files（普通键，切页不丢）为准渲染，移除走显式按钮
+    # （否则"上传→切页→切回"会把 wiz_files 整体误清，Issue #5 Bug1）。
+    removed: set = st.session_state.setdefault("wiz_removed", set())
     rendered_sigs: set = set()
     totals: dict = {}
 
@@ -223,29 +257,33 @@ def _step2_upload() -> None:
         st.markdown(f"#### 📎 {COMPOSITION_LABELS[doc_type]}（申报 {declared} 份）")
         uploads = st.file_uploader(
             f"上传{COMPOSITION_LABELS[doc_type]}PDF（可多份文件）",
-            type=["pdf"], accept_multiple_files=True, key=f"wiz_up::{doc_type}")
-        type_uploads = uploads or []
-        if not type_uploads:
-            st.warning(f"该类型申报 {declared} 份，尚未上传任何文件——请补传，"
-                       "或回第1步调整申报构成（核验时会按『实收与申报构成不符』显式提示）。")
-            totals[doc_type] = 0
-            continue
+            type=["pdf"], accept_multiple_files=True, key=f"wiz_up::{doc_type}") or []
 
-        found_instances = 0
-        for up in type_uploads:
-            data = up.getvalue()
-            sig = _file_sig(up.name, data)
-            uploaded_sigs.add(sig)
-            if sig in rendered_sigs:
-                st.caption(f"⚠️ {up.name} 已在其他类型的上传位处理；同一文件不要重复上传，"
-                           "请从当前上传位移除。")
+        # 本轮新选择的文件先解析入缓存（按内容签名去重；显式移除过的不自动加回）
+        for up in uploads:
+            sig = _file_sig(up.name, up.getvalue())
+            if sig in removed:
                 continue
-            if sig not in files_state:
-                with st.spinner(f"解析 {up.name} …"):
-                    files_state[sig] = _load_file(up.name, data, doc_type)
-            entry = files_state[sig]
+            if sig in files_state:
+                if files_state[sig].get("uploader") != doc_type:
+                    st.caption(f"⚠️ {up.name} 已在其他类型的上传位处理；同一文件不要重复上传，"
+                               "请从当前上传位移除。")
+                continue
+            with st.spinner(f"解析 {up.name} …"):
+                files_state[sig] = _load_file(up.name, up.getvalue(), doc_type)
+        # 用户已从上传控件移除的文件：解除"显式移除"标记，以后可重新上传
+        removed &= {_file_sig(up.name, up.getvalue()) for up in uploads}
+
+        # 已解析文件按缓存渲染（与上传控件解耦，切页不丢）
+        found_instances = 0
+        own = [(sig, e) for sig, e in files_state.items()
+               if e.get("uploader") == doc_type and sig not in removed]
+        for sig, entry in own:
             rendered_sigs.add(sig)
-            with st.expander(f"📄 {up.name}", expanded=True):
+            with st.expander(f"📄 {entry['name']}", expanded=True):
+                if st.button("移除此文件", key=f"wiz_rm::{sig}"):
+                    _drop_file_state(sig)
+                    st.rerun()
                 if entry.get("error"):
                     st.error(f"解析失败：{entry['error']}")
                     continue
@@ -295,22 +333,24 @@ def _step2_upload() -> None:
                     st.caption(f"⚠️ {w}")
 
         totals[doc_type] = found_instances
-        if found_instances != declared:
+        if found_instances == 0:
+            st.warning(f"该类型申报 {declared} 份，尚未上传任何文件——请补传，"
+                       "或回第1步调整申报构成（核验时会按『实收与申报构成不符』显式提示）。")
+        elif found_instances != declared:
             st.warning(f"该类型申报 {declared} 份，当前识别出 {found_instances} 份——"
                        "可回第1步调整申报，或补传/删除文件。")
         else:
             st.success(f"已识别 {found_instances} 份，与申报一致。")
 
-    _prune_removed_files(uploaded_sigs)
     st.session_state["wiz_totals"] = totals
 
     if st.button("← 上一步（修改申报构成）", key="wiz_back1"):
         st.session_state["wiz_step"] = 1
         st.rerun()
-    if not uploaded_sigs:
+    if not rendered_sigs:
         st.info("请先上传单证PDF，再进入下一步。")
     if st.button("下一步 · 逐份核对识别结果 →", type="primary", key="wiz_to_step3",
-                 disabled=not uploaded_sigs):
+                 disabled=not rendered_sigs):
         st.session_state["wiz_step"] = 3
         st.rerun()
 
@@ -697,6 +737,7 @@ def render_upload_wizard(field_renderer):
     field_renderer: app.py 提供的单份单据字段编辑渲染函数（F05契约复用）。"""
     st.session_state.setdefault("wiz_step", 1)
     step = st.session_state["wiz_step"]
+    restore_wizard_widgets()
 
     if st.session_state.get("wiz_files"):
         if st.button("↺ 重置向导（清空上传与申报）", key="wiz_reset"):
@@ -706,14 +747,17 @@ def render_upload_wizard(field_renderer):
     if step == 1:
         render_wizard_steps(1)
         _step1_composition()
+        mirror_wizard_widgets()
         st.stop()
     elif step == 2:
         render_wizard_steps(2)
         _step2_upload()
+        mirror_wizard_widgets()
         st.stop()
     elif step == 3:
         render_wizard_steps(3)
         _step3_confirm(field_renderer)
+        mirror_wizard_widgets()
         st.stop()
 
     # ---- 第4步：核验（结果展示由 app.py 主流程渲染） ----
