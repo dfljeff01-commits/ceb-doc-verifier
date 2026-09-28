@@ -30,6 +30,7 @@ import audit
 import auth_service
 from webapp import admin_audit, admin_codes, admin_users, data_check, doc_verify
 from webapp import session
+from webapp.format import fmt_dt
 from webapp.styles import APP_CSS
 
 st.set_page_config(
@@ -121,7 +122,7 @@ def render_home() -> None:
             '<div class="t">单据核对</div>'
             '<div class="d">上传/选择单证批次 → AI核验一致性、齐全性与路线合规 → '
             '风险评分与整改建议 → 生成整改邮件与PDF报告。<br>'
-            '<span style="color:#94A3B8;">支持示例批次、PDF向导上传、App现场批次复查。</span></div>'
+            '<span style="color:#6B7280;">支持示例批次、PDF向导上传、App现场批次复查。</span></div>'
             '</div>', unsafe_allow_html=True)
         if allowed_doc:
             st.page_link(PAGE_DOC, label="进入单据核对 →", icon="🔍",
@@ -135,7 +136,7 @@ def render_home() -> None:
             '<div class="t">数据核对</div>'
             '<div class="d">班列统一编号生成与查询（一键复制）→ 联运费用结算/预付款/实付核对 → '
             '补贴测算与三方对账 → Excel差异导入。<br>'
-            '<span style="color:#94A3B8;">编号规则：发运日期-发站-口岸-目的地-L/T；'
+            '<span style="color:#6B7280;">编号规则：发运日期-发站-口岸-目的地-L/T；'
             '客户报价、客户预付款与票据管理不在当前版本范围内。</span></div>'
             '</div>', unsafe_allow_html=True)
         if role in ("finance", "admin"):
@@ -145,7 +146,7 @@ def render_home() -> None:
 
     if role == "admin":
         st.divider()
-        st.markdown("##### 管理员快捷入口")
+        st.markdown("### 管理员快捷入口")
         c1, c2, c3, _ = st.columns([1, 1, 1, 2])
         with c1:
             st.page_link(PAGE_USERS, label="用户管理", icon="👤", use_container_width=True)
@@ -160,11 +161,15 @@ def render_home() -> None:
 
 # ---------------------------------------------------------------- 组装导航
 
-PAGE_HOME = st.Page(render_home, title="首页", icon="🏠", default=True)
-
 if not session.is_logged_in():
-    render_login()
+    # 登录前只注册登录页（P2-9）：导航若沿用上一次运行的页面清单，
+    # 退出登录后侧边栏会残留"数据核对/用户管理/操作日志"等内部入口。
+    login_page = st.Page(render_login, title="登录", icon="🔑",
+                         url_path="login", default=True)
+    st.navigation([login_page]).run()
     st.stop()
+
+PAGE_HOME = st.Page(render_home, title="首页", icon="🏠", default=True)
 
 role = session.current_role()
 PAGE_DOC = st.Page(doc_verify.render, title="单据核对", icon="🔍", url_path="doc-verify")
@@ -184,7 +189,7 @@ with st.sidebar:
     st.markdown(f"👤 **{user.get('username', '—')}**（{user.get('role_label', '—')}）")
     expires = st.session_state.get(session.TOKEN_EXPIRES_KEY, "")
     if expires:
-        st.caption(f"登录有效期至 {expires.replace('T', ' ')}")
+        st.caption(f"登录有效期至 {fmt_dt(expires)}")
     if st.button("🚪 退出登录", use_container_width=True):
         try:
             audit.record(session.current_username(), audit.LOGOUT, "user",
