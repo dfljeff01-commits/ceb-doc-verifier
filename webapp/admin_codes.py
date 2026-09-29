@@ -111,7 +111,7 @@ def dc_put_code(payload: dict, mode: str = "upsert") -> tuple[bool, str]:
 # ---------------------------------------------------------------- 页面
 
 def render() -> None:
-    st.header("🔤 代码字典维护")
+    st.title("🔤 代码字典维护")
     st.caption("仅管理员可见 · 班列编号使用的 发站/口岸/目的地 缩写登记。"
                "缩写规则与编号引擎完全一致：1-8位大写字母/数字，不含连字符。"
                "停用为软删除——历史班列编号不受影响，仅新建班列不再可选。")
@@ -290,7 +290,7 @@ def _render_disable(codes: list[dict]) -> None:
 
 
 def _render_list(codes: list[dict]) -> None:
-    st.markdown("##### 📋 全部缩写（按类别分组）")
+    st.markdown("### 📋 全部缩写（按类别分组）")
     if not codes:
         st.info("字典为空。")
         return

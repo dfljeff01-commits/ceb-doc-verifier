@@ -10,12 +10,61 @@ from datetime import date
 import streamlit as st
 
 import audit
+from webapp.format import SECOND_FMT, fmt_dt
 from webapp.styles import APP_CSS
+
+#: detail 字典键 → 中文标签（未收录的键原样展示，保证留痕不丢信息）
+_DETAIL_KEY_LABELS = {
+    "via": "来源", "reason": "原因", "user": "用户", "username": "用户",
+    "count": "命中数", "photos": "张数", "source": "上传来源",
+    "risk_grade": "风险等级", "risk_score": "风险分", "batch": "批次",
+    "lookup": "检索词", "comp": "申报构成", "fields": "字段数",
+    "object": "对象", "message": "说明",
+}
+
+_ACTION_ICONS = {"LOGIN": "🔑", "LOGOUT": "🚪", "LOGIN_FAILED": "⚠️",
+                 "UPLOAD_DOCS": "📎", "VERIFY": "🔍", "EDIT_FIELD": "✍️",
+                 "VIEW_REPORT": "📄", "GENERATE_EMAIL": "✉️",
+                 "GENERATE_REPORT_PDF": "⬇️", "QUICK_CHECK": "📱",
+                 "CREATE_USER": "➕", "ENABLE_USER": "✅",
+                 "DISABLE_USER": "🚫", "RESET_PASSWORD": "🔑"}
+
+
+def _fmt_value(value) -> str:
+    """嵌套 dict/list → 可读短语（递归展开，不引入原始 JSON 语法）。"""
+    if value is None:
+        return "—"
+    if isinstance(value, dict):
+        return "、".join(f"{_DETAIL_KEY_LABELS.get(k, k)} {_fmt_value(v)}"
+                        for k, v in value.items()) or "—"
+    if isinstance(value, (list, tuple)):
+        return "、".join(_fmt_value(v) for v in value) or "—"
+    return str(value)
+
+
+def _fmt_detail(detail) -> str:
+    """detail 摘要：常见键给中文，核验汇总给结论式描述。"""
+    if not detail:
+        return "—"
+    if not isinstance(detail, dict):
+        return _fmt_value(detail)
+    parts = []
+    for key, value in detail.items():
+        if key == "summary" and isinstance(value, dict):
+            parts.append(f"核验 {value.get('total', '—')} 项："
+                         f"通过 {value.get('pass', 0)} · "
+                         f"警告 {value.get('warning', 0)} · "
+                         f"不合格 {value.get('fail', 0)}")
+        elif key == "one_line" and isinstance(value, str) and len(value) > 40:
+            parts.append(f"摘要：{value[:40]}…")
+        else:
+            parts.append(f"{_DETAIL_KEY_LABELS.get(key, key)}：{_fmt_value(value)}")
+    return "；".join(parts) or "—"
 
 
 def render() -> None:
     st.markdown(APP_CSS, unsafe_allow_html=True)
-    st.header("📜 操作日志")
+    st.title("📜 操作日志")
     st.caption("仅管理员可见 · 审计记录只增不改（数据库层拒绝修改/删除/清空）")
 
     with st.form("audit_filter_form"):
@@ -53,23 +102,34 @@ def render() -> None:
     if not rows:
         st.info("没有符合条件的记录。")
         return
+
+    table, raw = [], []
     for r in rows[:100]:
-        created = r["created_at"]
-        when = created.astimezone().strftime("%Y-%m-%d %H:%M:%S") if created else "—"
-        obj = f"{r['object_type']}:{r['object_id']}" if r.get("object_id") else (r.get("object_type") or "—")
-        change = ""
-        if r.get("before_value") is not None or r.get("after_value") is not None:
-            change = (f"　修改前 `{r.get('before_value')}` → 修改后 `{r.get('after_value')}`"
-                      if r["action"] == audit.EDIT_FIELD
-                      else f"　数据：`{r.get('after_value') or r.get('detail') or ''}`")
-        detail = f"　{r['detail']}" if r.get("detail") else ""
-        ip = f"　IP {r['ip']}" if r.get("ip") else ""
-        icon = {"LOGIN": "🔑", "LOGOUT": "🚪", "LOGIN_FAILED": "⚠️",
-                "UPLOAD_DOCS": "📎", "VERIFY": "🔍", "EDIT_FIELD": "✍️",
-                "VIEW_REPORT": "📄", "GENERATE_EMAIL": "✉️",
-                "GENERATE_REPORT_PDF": "⬇️", "QUICK_CHECK": "📱",
-                "CREATE_USER": "➕", "ENABLE_USER": "✅",
-                "DISABLE_USER": "🚫", "RESET_PASSWORD": "🔑"}.get(r["action"], "•")
-        st.markdown(
-            f"{icon} `{when}`　**{r['username']}**　{r['action_label']}"
-            f"（{r['action']}）　对象：{obj}{change}{detail}{ip}")
+        detail_text = _fmt_detail(r.get("detail"))
+        if r["action"] == audit.EDIT_FIELD and (
+                r.get("before_value") is not None or r.get("after_value") is not None):
+            detail_text = (f"修改前 {_fmt_value(r.get('before_value'))} → "
+                           f"修改后 {_fmt_value(r.get('after_value'))}"
+                           + (f"；{detail_text}" if detail_text != "—" else ""))
+        obj = (f"{r['object_type']}:{r['object_id']}" if r.get("object_id")
+               else (r.get("object_type") or "—"))
+        table.append({
+            "时间": fmt_dt(r["created_at"], SECOND_FMT),
+            "操作人": r["username"],
+            "操作": f"{_ACTION_ICONS.get(r['action'], '•')} {r['action_label']}",
+            "动作码": r["action"],
+            "对象": obj,
+            "详情": detail_text,
+            "IP": r.get("ip") or "—",
+        })
+        raw.append({"id": r.get("id"),
+                    "created_at": fmt_dt(r.get("created_at"), SECOND_FMT),
+                    "username": r.get("username"), "action": r.get("action"),
+                    "object_type": r.get("object_type"),
+                    "object_id": r.get("object_id"), "detail": r.get("detail"),
+                    "before_value": r.get("before_value"),
+                    "after_value": r.get("after_value"), "ip": r.get("ip")})
+
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    with st.expander(f"原始记录（{len(raw)} 条 · 技术留痕，出问题时给运维看）"):
+        st.json(raw)
