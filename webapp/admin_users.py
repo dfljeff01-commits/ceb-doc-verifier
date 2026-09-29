@@ -5,12 +5,13 @@ import streamlit as st
 
 import auth_service
 from webapp import session
+from webapp.format import fmt_dt
 
 ROLE_LABELS = auth_service.ROLE_LABELS
 
 
 def render() -> None:
-    st.header("👤 用户管理")
+    st.title("👤 用户管理")
     st.caption("仅管理员可见：账号的新增 / 启用禁用 / 密码重置（全部操作留痕审计）")
 
     tab_list, tab_create, tab_pwd = st.tabs(["账号列表", "新增账号", "重置密码"])
@@ -31,12 +32,12 @@ def _render_user_table() -> None:
         return
     st.dataframe(
         [{"用户名": u["username"], "角色": u["role_label"], "状态": "启用" if u["status"] == "active" else "禁用",
-          "创建时间": (u.get("created_at") or "—").strftime("%Y-%m-%d %H:%M") if u.get("created_at") else "—",
-          "最后登录": (u.get("last_login_at") or "—").strftime("%Y-%m-%d %H:%M") if u.get("last_login_at") else "—"}
+          "创建时间": fmt_dt(u.get("created_at")),
+          "最后登录": fmt_dt(u.get("last_login_at"))}
          for u in users],
         use_container_width=True, hide_index=True)
 
-    st.markdown("##### 启用 / 禁用")
+    st.markdown("### 启用 / 禁用")
     me = session.current_username()
     target = st.selectbox("选择账号", [u["username"] for u in users],
                           key="admin_toggle_user",

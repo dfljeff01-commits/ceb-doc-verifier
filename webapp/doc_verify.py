@@ -252,7 +252,7 @@ def render_document_groups(verification: dict) -> None:
     if not groups:
         return
 
-    st.markdown("###### 按单据查看问题（每份单据的问题、字段与修改建议）")
+    st.markdown("#### 按单据查看问题（每份单据的问题、字段与修改建议）")
 
     def _issue_card(issue: dict) -> None:
         meta = STATUS_META.get(issue["status"], STATUS_META[STATUS_WARNING])
@@ -317,7 +317,7 @@ def render_detail_section(results: list) -> None:
     problems = [r for r in sort_results_by_severity(results) if r["status"] != STATUS_PASS]
     passes = [r for r in results if r["status"] == STATUS_PASS]
 
-    st.markdown("###### 核验明细")
+    st.markdown("#### 核验明细")
     if problems:
         st.markdown(
             f'<span style="font-size:13px;color:#6B7280;">发现 <b style="color:#B71C1C;">'
@@ -860,7 +860,7 @@ def render_recognition_summary(batch: dict, documents: list) -> None:
         for field in summary["open_fields"]:
             open_items.append((title, doc_contract.FIELD_LABELS_ZH.get(field, field),
                                doc_contract.field_status(doc, field)))
-    st.markdown("###### 🔎 识别状态（系统是否找到字段）")
+    st.markdown("### 🔎 识别状态（系统是否找到字段）")
     st.markdown(
         f'<div style="background:#F9FAFB;border:1px solid #E5E7EB;border-radius:12px;'
         f'padding:10px 16px;font-size:13.5px;line-height:1.9;">'
@@ -911,17 +911,28 @@ def render_recent_batches() -> None:
 
 
 def render() -> None:
-    """单据核对模块页签入口（Issue #4 任务二）。
+    """单据核对模块入口（Issue #6 引导式重构）。
 
-    页签一：单证智能核验（原有全部功能，_render_doc_verify 原样保留）；
-    页签二：运单核对（车底号/铅封号，waybill_check 页）。
-    原有函数体未做任何缩进/逻辑改动，只换名，降低回归风险。
+    第一层只放"您要做什么"场景卡片（上传核验 / 运单核对 / 手机批次复查），
+    示例批次收在次要入口后面（默认不铺开）；点击卡片进入各自的线性流程页
+    （上传 → 核对 → 展示 → 导出），每页左上角可返回入口层。
+    核验引擎、上传向导、字段编辑、报告渲染等函数全部原样复用，业务逻辑零改动。
     """
-    tab_verify, tab_waybill = st.tabs(["🔎 单证智能核验", "🚋 运单核对（车底号/铅封号）"])
-    with tab_verify:
-        _render_doc_verify()
-    with tab_waybill:
+    scene = st.session_state.get(DOC_SCENE_KEY)
+    if scene not in (SCENE_UPLOAD, SCENE_WAYBILL, SCENE_MOBILE, SCENE_SAMPLE):
+        _render_scene_entry()
+        return
+    if st.button("← 返回业务入口", key="doc_scene_back"):
+        st.session_state.pop(DOC_SCENE_KEY, None)
+        st.rerun()
+    if scene == SCENE_UPLOAD:
+        _render_upload_flow()
+    elif scene == SCENE_WAYBILL:
         waybill_check.render()
+    elif scene == SCENE_MOBILE:
+        _render_mobile_flow()
+    else:
+        _render_sample_flow()
 
 
 # 单证来源选项（模块级常量，供 _source_mode_radio 与回归测试共用）
@@ -935,9 +946,21 @@ SOURCE_MODE_OPTIONS = [SOURCE_SAMPLE, SOURCE_UPLOAD, SOURCE_MOBILE]
 # 选择值必须落在普通键，否则"切页→切回"后来源选择被静默重置（Issue #5 Bug1）。
 SOURCE_MODE_STATE_KEY = "ceb_source_mode"
 
+# 场景入口（Issue #6：先选场景、再走线性流程，替代页签/单选堆叠）。
+# 场景值同样落在普通session键（与来源选择同一机制），切页往返不丢。
+DOC_SCENE_KEY = "ceb_doc_scene"
+SCENE_UPLOAD = "upload"      # 📎 上传PDF单证核验
+SCENE_WAYBILL = "waybill"    # 🚋 运单核对（车底号/铅封号）
+SCENE_MOBILE = "mobile"      # 📱 手机拍摄批次复查
+SCENE_SAMPLE = "sample"      # 📁 查看示例（辅助内容，默认收起）
+
 
 def _source_mode_radio() -> str:
-    """渲染"选择单证来源"单选，并把选择持久化到普通session键。"""
+    """渲染"选择单证来源"单选，并把选择持久化到普通session键。
+
+    Issue #6 后导航改由场景卡片承担，本函数保留供回归测试与机制兜底
+    （切页状态保持的修复口径不变，test_issue5_fixes.py 覆盖）。
+    """
     prev = st.session_state.get(SOURCE_MODE_STATE_KEY)
     index = SOURCE_MODE_OPTIONS.index(prev) if prev in SOURCE_MODE_OPTIONS else 0
     chosen = st.radio(
@@ -959,106 +982,70 @@ def _mobile_batch_unavailable() -> None:
         st.stop()
 
 
-def _render_doc_verify() -> None:
+def _materials_used() -> bool:
+    """本批次是否已生成过整改材料（邮件/AI追问）——用于步骤指示器第4步高亮。"""
+    return any(k.startswith(("email_generated_dv::", "chat::")) and v
+               for k, v in st.session_state.items())
+
+
+# ---------------------------------------------------------------- 入口层（场景卡片）
+
+def _render_scene_entry() -> None:
+    """入口层：只放"请选择要办理的业务"场景卡片；示例内容收在次要按钮后面。
+
+    卡片顺序按业务优先级：运单核对第一（当前主推），其余依次排列。
+    """
     st.markdown(APP_CSS, unsafe_allow_html=True)
 
-    st.title("🚂 中欧班列单证智能核验")
-    st.caption("AI + 多式联运 · 单证交叉核验工具（初级版 · 内部试用）")
-    st.info(SCENE_SENTENCE, icon="🎯")
-
-    # ---------------- 第一步：选择单证来源（P0 卡片式入口） ----------------
-    source_mode = _source_mode_radio()
-
-    _mode_upload = source_mode.startswith("📎")
-    _mode_mobile = source_mode.startswith("📱")
-    batch = None
-    if not (_mode_upload or _mode_mobile):
-        labels = [label for _, label in BATCH_FILES]
-        batch_ids = [fn.removesuffix(".json") for fn, _ in BATCH_FILES]
-        # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与培训
-        default_index = (
-            batch_ids.index(st.query_params["batch"])
-            if "batch" in st.query_params and st.query_params["batch"] in batch_ids
-            else 0
-        )
-        chosen_col, desc_col = st.columns([1, 2])
-        with chosen_col:
-            chosen_index = labels.index(
-                st.selectbox("选择示例批次（模拟上传+OCR提取完成）", labels, index=default_index)
-            )
-        with desc_col:
-            batch = load_batch(BATCH_FILES[chosen_index][0])
-            st.markdown(
-                f'<div style="border:1px solid #E5E7EB; border-radius:12px; padding:10px 16px;'
-                f' background:#F9FAFB; font-size:13px; color:#374151;">'
-                f'<b>{batch.get("batch_name", "")}</b>　{batch.get("description", "")}'
-                f'<br><span style="color:#6B7280;">🚉 运输路径：{batch.get("destination_summary", "—")}'
-                f'　|　📎 已提取单证：'
-                f'{"、".join(d.get("title", d.get("doc_type", "")) for d in batch["documents"])}</span></div>',
-                unsafe_allow_html=True)
-        # 流程进度（P1 步骤指示：示例模式沿用四步指示）
-        _materials_used = any(
-            k.startswith(("email_generated_dv::", "chat::")) and v
-            for k, v in st.session_state.items())
-        render_step_indicator(2, 3 if not _materials_used else 4)
-
-    # ---------------- 手机拍摄批次模式（现场触手定位：App只传照片，完整报告回电脑端看） ----------------
-
-    _mobile_record = None
-    if _mode_mobile:
-        _mobile_batch_unavailable()
-        _default_mobile_id = st.query_params.get("mobile_batch", "")
-        mobile_id = st.text_input(
-            "输入手机App上传后显示的批次编号（形如 MB-20260920-143001-8A3C）",
-            value=_default_mobile_id, key="mobile_batch_id", placeholder="MB-…").strip()
-        if not mobile_id:
-            st.info("现场用手机App拍照上传后，App只返回一句话摘要；在此输入批次编号即可查看"
-                    "该批次的完整核验报告（明细、分数构成、AI建议都在电脑端看）。")
-            st.stop()
-        try:
-            _resp = fetch_batch_full(mobile_id)
-            if _resp.status_code == 401:
-                session.logout()
-                st.warning("登录状态已过期，请重新登录。")
+    st.title("🔍 单据核对")
+    st.markdown("#### 请选择要办理的业务")
+    st.markdown('<div class="ceb-cards-anchor"></div>', unsafe_allow_html=True)
+    col_left, col_right = st.columns(2)
+    with col_left:
+        if st.button("🚋 **运单核对（车底号/铅封号）**\n\n"
+                     "提交订车系统之后、确认运单之前：以现场装车清单为基准，"
+                     "标红不一致的车底号/铅封号",
+                     use_container_width=True, key="doc_scene_waybill"):
+            st.session_state[DOC_SCENE_KEY] = SCENE_WAYBILL
+            st.rerun()
+        if st.button("📱 **手机拍摄批次复查**\n\n"
+                     "现场已用 App 拍照上传？输入批次编号，"
+                     "在电脑端查看完整核验报告",
+                     use_container_width=True, key="doc_scene_mobile"):
+            st.session_state[DOC_SCENE_KEY] = SCENE_MOBILE
+            st.rerun()
+    with col_right:
+        if st.button("📎 **上传PDF单证核验**\n\n"
+                     "把手里的 PDF 单证传上来：声明构成 → 上传拆分 → 逐份确认 → "
+                     "AI 核验 → 导出报告与整改材料",
+                     use_container_width=True, key="doc_scene_upload"):
+            st.session_state[DOC_SCENE_KEY] = SCENE_UPLOAD
+            st.rerun()
+        with st.container(border=True):
+            st.markdown('<div class="ceb-secondary-anchor"></div>',
+                        unsafe_allow_html=True)
+            if st.button("📁 查看示例批次（3 组演示数据，先看看系统能做什么）",
+                         use_container_width=True, key="doc_scene_sample"):
+                st.session_state[DOC_SCENE_KEY] = SCENE_SAMPLE
                 st.rerun()
-            if _resp.status_code == 404:
-                st.error(f"未找到批次 {mobile_id} 的核验记录——请核对编号后重试；"
-                         f"若持续出现，请联系管理员确认该批次已上传成功。")
-                st.stop()
-            _resp.raise_for_status()
-            _mobile_record = _resp.json()
-        except Exception as e:
-            st.error(f"查询批次失败：{e}")
-            st.stop()
-        if not _mobile_record.get("verification"):
-            st.error("该批次记录缺少完整核验报告（可能由旧版本App上传），无法展示。")
-            st.stop()
-        _verif = _mobile_record["verification"]
-        batch = {
-            "batch_id": _mobile_record.get("batch_id", mobile_id),
-            "batch_name": _verif.get("batch_name") or f"App现场拍摄 {mobile_id}",
-            "destination_summary": "（手机App现场拍摄上传）",
-            "documents": _mobile_record.get("documents", []),
-        }
-        _uploader = _mobile_record.get('created_by') or '—'
-        st.success(f"已加载手机批次 {_mobile_record.get('batch_id')} —— "
-                   f"拍摄于 {_mobile_record.get('created_at', '—')}（上传人：{_uploader}），"
-                   f"风险等级：{_mobile_record.get('risk_label', '—')}（{_mobile_record.get('risk_level', '—')}）")
-        st.caption("App上的一句话结论：" + _mobile_record.get("one_line", "—"))
 
     render_recent_batches()
+    _render_sidebar_guide()
 
-    # 侧边栏：功能入口与使用指引（P1：入口整理，不再承担来源选择主交互）
+
+def _render_sidebar_guide() -> None:
+    """侧边栏：使用指引（只描述怎么用，不承担导航）。"""
     with st.sidebar:
-        st.header("🧭 使用指引")
+        st.subheader("🧭 使用指引")
         st.markdown(
-            "**上传模式（向导式）**\n\n"
-            "① 声明单据构成　→　② 逐类型上传（多单据PDF自动拆分）　→　"
-            "③ 逐份核对确认　→　④ 核验查看分层结果\n\n"
-            "**示例模式**\n\n"
-            "选择批次 → 核对字段 → 查看报告 → 生成整改材料\n\n"
-            "**手机批次模式**\n\n"
-            "现场App拍照上传 → 记下批次编号 → 在此输入查看完整报告")
+            "**运单核对（车底号/铅封号）**\n\n"
+            "上传装车清单 + PDF运单 → 开始核对 → 标红不一致项\n\n"
+            "**上传PDF单证核验**\n\n"
+            "声明单据构成 → 上传拆分 → 逐份确认 → 核验查看结果 → 导出报告/整改材料\n\n"
+            "**手机拍摄批次复查**\n\n"
+            "现场App拍照上传 → 记下批次编号 → 输入编号查看完整报告\n\n"
+            "**查看示例**\n\n"
+            "3组演示数据，先了解系统能做什么")
         st.divider()
         st.caption("📱 Android App：现场拍照即传+速查（电脑端是大脑、手机端是触手），"
                    "完整处理与深度分析在本网页完成；安装包请联系管理员获取。"
@@ -1066,51 +1053,145 @@ def _render_doc_verify() -> None:
         st.divider()
         st.caption("内部系统 · 数据保存于公司内网服务器 · 全程操作留痕")
 
-    # ---------------- 向导式上传模式（任务书问题二：声明→上传拆分→逐份确认→核验） ----------------
 
-    wizard_batch = None
-    edited_documents = None
-    edited_count = 0
-    if _mode_upload:
-        if not pdf_ingest.ocr_available():
-            st.warning("未检测到本机 tesseract OCR，扫描型PDF将无法提取文字（文本型PDF不受影响）。"
-                       "安装方法见 README。")
-        result = upload_wizard.render_upload_wizard(render_doc_field_editor)
-        if result is None:
-            st.stop()
-        wizard_batch, edited_documents, edited_count = result
-        batch = wizard_batch
+# ---------------------------------------------------------------- 各场景线性流程
 
-    if not (_mode_upload or _mode_mobile):
-        st.subheader("2️⃣ 单证字段（提取结果，可手动修改实时复核）")
-        # 示例模式：整批编辑（向导模式的逐份编辑已在第3步完成并快照）
-        edited_documents, edited_count = collect_edited_documents(batch)
-        c1, c2, _ = st.columns([1, 2, 3])
-        with c1:
-            if st.button("↺ 重置本批次修改", disabled=edited_count == 0):
-                reset_edits(batch)
-        with c2:
-            if edited_count:
-                st.markdown(f"<span style='color:#B26A00;font-weight:600;'>"
-                            f"✍️ 已手动修改 {edited_count} 个字段，以下核验结果已实时更新</span>",
-                            unsafe_allow_html=True)
+def _render_upload_flow() -> None:
+    """📎 上传PDF单证核验：向导（声明→上传→逐份确认）→ 核验结果 → 整改材料。"""
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+    st.subheader("📎 上传PDF单证核验")
+    st.caption("按向导一步步来：声明单据构成 → 上传拆分 → 逐份确认 → 查看核验结果。")
 
-    elif _mode_mobile:
-        # 手机批次：报告已在拍摄时核验完成，这里只读展示（完整明细见下方核验结果区），
-        # 不提供字段编辑——现场纠正应回单证来源处重拍/重传，保持结果可追溯。
-        edited_documents = batch["documents"]
-        edited_count = 0
+    if not pdf_ingest.ocr_available():
+        st.warning("未检测到本机 tesseract OCR，扫描型PDF将无法提取文字（文本型PDF不受影响）。"
+                   "安装方法见 README。")
+    result = upload_wizard.render_upload_wizard(render_doc_field_editor)
+    if result is None:
+        st.stop()
+    batch, edited_documents, edited_count = result
 
     # 核验（规则全部来自 verification_engine，本文件只做展示；优先走API，不可用时直连）
-    if _mode_mobile:
-        # 手机批次直接使用拍摄时服务端核验并持久化的报告（与App一句话摘要同源同口径）
-        verification, verify_mode = _mobile_record["verification"], "api-store"
-    else:
-        effective_batch = {**batch, "documents": edited_documents}
-        with st.spinner("核验计算中…"):
-            verification, verify_mode = run_verification_effective(effective_batch)
-        if _mode_upload and wizard_batch is not None:
-            _persist_web_batch(effective_batch, verification)
+    effective_batch = {**batch, "documents": edited_documents}
+    with st.spinner("核验计算中…"):
+        verification, verify_mode = run_verification_effective(effective_batch)
+    _persist_web_batch(effective_batch, verification)
+
+    _render_report_tail(batch, edited_documents, edited_count, verification, verify_mode)
+
+
+def _render_mobile_flow() -> None:
+    """📱 手机拍摄批次复查：输入批次编号 → 查看完整报告（只读，现场纠正回来源重拍）。"""
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+    st.subheader("📱 手机拍摄批次复查")
+
+    _mobile_batch_unavailable()
+    _default_mobile_id = st.query_params.get("mobile_batch", "")
+    mobile_id = st.text_input(
+        "输入手机App上传后显示的批次编号（形如 MB-20260920-143001-8A3C）",
+        value=_default_mobile_id, key="mobile_batch_id", placeholder="MB-…").strip()
+    if not mobile_id:
+        st.info("现场用手机App拍照上传后，App只返回一句话摘要；在此输入批次编号即可查看"
+                "该批次的完整核验报告（明细、分数构成、AI建议都在电脑端看）。")
+        st.stop()
+    try:
+        _resp = fetch_batch_full(mobile_id)
+        if _resp.status_code == 401:
+            session.logout()
+            st.warning("登录状态已过期，请重新登录。")
+            st.rerun()
+        if _resp.status_code == 404:
+            st.error(f"未找到批次 {mobile_id} 的核验记录——请核对编号后重试；"
+                     f"若持续出现，请联系管理员确认该批次已上传成功。")
+            st.stop()
+        _resp.raise_for_status()
+        _mobile_record = _resp.json()
+    except Exception as e:
+        st.error(f"查询批次失败：{e}")
+        st.stop()
+    if not _mobile_record.get("verification"):
+        st.error("该批次记录缺少完整核验报告（可能由旧版本App上传），无法展示。")
+        st.stop()
+    _verif = _mobile_record["verification"]
+    batch = {
+        "batch_id": _mobile_record.get("batch_id", mobile_id),
+        "batch_name": _verif.get("batch_name") or f"App现场拍摄 {mobile_id}",
+        "destination_summary": "（手机App现场拍摄上传）",
+        "documents": _mobile_record.get("documents", []),
+    }
+    _uploader = _mobile_record.get('created_by') or '—'
+    st.success(f"已加载手机批次 {_mobile_record.get('batch_id')} —— "
+               f"拍摄于 {_mobile_record.get('created_at', '—')}（上传人：{_uploader}），"
+               f"风险等级：{_mobile_record.get('risk_label', '—')}（{_mobile_record.get('risk_level', '—')}）")
+    st.caption("App上的一句话结论：" + _mobile_record.get("one_line", "—"))
+
+    # 手机批次：报告已在拍摄时核验完成，这里只读展示——现场纠正应回单证来源处
+    # 重拍/重传，保持结果可追溯。
+    edited_documents = batch["documents"]
+    _render_report_tail(batch, edited_documents, 0,
+                        _mobile_record["verification"], "api-store")
+
+
+def _render_sample_flow() -> None:
+    """📁 示例批次：选择演示批次 → 字段核对（手动修改实时复核）→ 核验结果 → 整改材料。"""
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+    st.subheader("📁 示例批次（演示数据）")
+    st.caption("演示数据已模拟完成上传与识别提取，可直接体验"
+               "“核对字段 → 查看报告 → 生成整改材料”的完整流程。")
+
+    labels = [label for _, label in BATCH_FILES]
+    batch_ids = [fn.removesuffix(".json") for fn, _ in BATCH_FILES]
+    # 支持 URL 参数直达批次（如 ?batch=batch_with_issues），便于分享与培训
+    default_index = (
+        batch_ids.index(st.query_params["batch"])
+        if "batch" in st.query_params and st.query_params["batch"] in batch_ids
+        else 0
+    )
+    chosen_col, desc_col = st.columns([1, 2])
+    with chosen_col:
+        chosen_index = labels.index(
+            st.selectbox("选择示例批次（模拟上传+OCR提取完成）", labels, index=default_index)
+        )
+    with desc_col:
+        batch = load_batch(BATCH_FILES[chosen_index][0])
+        st.markdown(
+            f'<div style="border:1px solid #E5E7EB; border-radius:12px; padding:10px 16px;'
+            f' background:#F9FAFB; font-size:13px; color:#374151;">'
+            f'<b>{batch.get("batch_name", "")}</b>　{batch.get("description", "")}'
+            f'<br><span style="color:#6B7280;">🚉 运输路径：{batch.get("destination_summary", "—")}'
+            f'　|　📎 已提取单证：'
+            f'{"、".join(d.get("title", d.get("doc_type", "")) for d in batch["documents"])}</span></div>',
+            unsafe_allow_html=True)
+    # 流程进度（示例模式沿用四步指示）
+    render_step_indicator(2, 3 if not _materials_used() else 4)
+
+    st.subheader("2️⃣ 单证字段（提取结果，可手动修改实时复核）")
+    # 示例模式：整批编辑（向导模式的逐份编辑已在向导内完成并快照）
+    edited_documents, edited_count = collect_edited_documents(batch)
+    c1, c2, _ = st.columns([1, 2, 3])
+    with c1:
+        if st.button("↺ 重置本批次修改", disabled=edited_count == 0):
+            reset_edits(batch)
+    with c2:
+        if edited_count:
+            st.markdown(f"<span style='color:#B26A00;font-weight:600;'>"
+                        f"✍️ 已手动修改 {edited_count} 个字段，以下核验结果已实时更新</span>",
+                        unsafe_allow_html=True)
+
+    # 核验（规则全部来自 verification_engine，本文件只做展示；优先走API，不可用时直连）
+    effective_batch = {**batch, "documents": edited_documents}
+    with st.spinner("核验计算中…"):
+        verification, verify_mode = run_verification_effective(effective_batch)
+
+    _render_report_tail(batch, edited_documents, edited_count, verification, verify_mode)
+
+
+def _render_report_tail(batch: dict, edited_documents: list, edited_count: int,
+                        verification: dict, verify_mode: str) -> None:
+    """各进入方式共用的收尾段：识别状态 → 核验结果 → 导出 → 整改材料。
+
+    渲染组件与原页面完全一致（风险仪表/分组明细/知识库依据/AI建议/邮件/追问），
+    未改动任何判定与展示逻辑。
+    """
     summary = verification["summary"]
     st.caption("🔌 核验通道：" + (
         "在线核验服务" if verify_mode == "api"
@@ -1145,7 +1226,7 @@ def _render_doc_verify() -> None:
     render_ai_reasoning(verification["results"], edited_documents)
 
     # 第四步：生成整改材料（P1 分组导航）
-    st.markdown("###### 4️⃣ 生成整改材料")
+    st.markdown("### 4️⃣ 生成整改材料")
     render_email_generator(verification, edited_documents)
     # 对话助手收进默认折叠的展开器：chat_input 挂载时会自动聚焦并把页面滚到底部，
     # 折叠后首屏保持在顶部；用户点开时再聚焦正合适。

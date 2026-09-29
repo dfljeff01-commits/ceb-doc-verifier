@@ -6,12 +6,14 @@
                 → 本页展示（编号查询/台账编辑/三方对账/导入预览确认）
   API 不可用时降级为进程内直连 train_store（本地补记审计，口径一致）。
 
-五个页签（任务书 §一~§五）：
-  🔎 编号查询  按发运日期/线路查正式编号，一键复制（粘贴回Excel台账用）
-  📋 班列台账  基础信息/结算明细/预付款/补贴测算 编辑（四状态+留痕+差异提示）
-  ➕ 登记班列  正式登记（自动编号+冲突后缀）或预估登记（EST-，可锁定映射）
-  ⚖️ 三方对账  大同供应链 vs 联运公司 vs 上级拨付 + 阈值告警 + 重复值检测
-  📥 Excel导入 差异预览（新增/一致/冲突）→ 人工逐行决定 覆盖/保留，绝不静默覆盖
+业务场景（引导式入口：先选"要办哪项业务"，再进各自的线性流程页）：
+  🔎 查班列编号    按发运日期/线路查正式编号，一键复制（粘贴回Excel台账用）
+  ➕ 登记新班列    正式登记（自动编号+冲突后缀）或预估登记（EST-，可锁定映射）
+  📋 班列台账维护  基础信息/结算明细/预付款/补贴测算 编辑（四状态+留痕+差异提示）
+  ⚖️ 三方对账      大同供应链 vs 联运公司 vs 上级拨付 + 阈值告警 + 重复值检测
+  💰 资金/费用批次 一笔资金/费用登记成批次，分摊关联到多列班列
+  🧮 双表对账      我方台账与对方账单自动比对，逐项确认差异后入库
+  📥 Excel差异导入 差异预览（新增/一致/冲突）→ 人工逐行/批量决定 覆盖/保留，绝不静默覆盖
 
 范围边界（任务书 §本阶段范围）：不含客户报价、客户预付款、票据流（v2 另行下发）。
 """
@@ -486,15 +488,20 @@ def _num_input(label: str, key: str, value=None) -> float | None:
         return None
 
 
-def _route_selectors(code_map: dict, key_prefix: str, defaults: dict | None = None):
-    """发站/口岸/目的地下拉（读代码字典，任务书 §四 线路选择）。"""
+def _route_selectors(code_map: dict, key_prefix: str, defaults: dict | None = None,
+                     all_label: str = "（全部）"):
+    """发站/口岸/目的地下拉（读代码字典，线路选择）。
+
+    all_label：哨兵选项文案。查询场景用"（全部）"（默认=不筛选）；
+    登记/创建场景应传"（请选择）"（默认=未选择，避免误以为已填好）。
+    """
     defaults = defaults or {}
     cols = st.columns(3)
     picks = {}
     for col, (cat, label) in zip(cols, (("station", "发站"), ("port", "口岸"),
                                         ("dest", "目的地"))):
         options = sorted((code_map.get(cat) or {}).items())
-        labels = [f"{c}={n}" for c, n in options] + ["（全部）"]
+        labels = [f"{c}={n}" for c, n in options] + [all_label]
         default_idx = len(labels) - 1
         d = defaults.get(cat)
         if d:
@@ -507,35 +514,73 @@ def _route_selectors(code_map: dict, key_prefix: str, defaults: dict | None = No
                                       key=f"{key_prefix}_{cat}")
     for cat in ("station", "port", "dest"):
         picked = picks[cat]
-        picks[cat] = "" if "（全部）" in picked else picked.split("=")[0]
+        # 哨兵选项（（全部）/（请选择））一律视作未选择
+        picks[cat] = "" if picked.startswith("（") else picked.split("=")[0]
     return picks
 
 
 # ================================================================ 页签实现
 
+# 场景入口（Issue #6：先选业务场景，再进各自的线性流程页，替代页签堆叠）。
+# 场景值落在普通session键，切页往返不丢（与单据核对同一机制，Issue #5 口径）。
+DC_SCENE_KEY = "ceb_dc_scene"
+DC_SCENES = [
+    ("query", "🔎", "查班列编号",
+     "知道发运日期或线路？查出班列统一编号，一键复制粘贴到 Excel 台账"),
+    ("register", "➕", "登记新班列",
+     "登记一列新班列：直接生成正式编号，或先生成预估编号、事后再锁定"),
+    ("ledger", "📋", "班列台账维护",
+     "查看某列班列的费用结算、预付款、补贴测算，补录或修改"),
+    ("recon", "⚖️", "三方对账",
+     "我方、联运公司、上级拨付三方金额放一起，自动找出对不上的班列"),
+    ("fund", "💰", "资金/费用批次",
+     "把一笔资金或费用登记成批次，分摊关联到多列班列"),
+    ("dual", "🧮", "双表对账",
+     "我方台账和对方账单两张表自动比对，逐项确认差异后入库"),
+    ("import", "📥", "Excel差异导入",
+     "把对方 Excel 里的数据批量导进系统：先预览差异，逐行或批量决定"),
+]
+
+
 def render() -> None:
+    """数据核对模块入口（Issue #6 引导式重构）。
+
+    第一层只放"您要办理哪项业务？"场景卡片；点击进入各自业务页
+    （原页签内的业务内容原样保留，仅外层导航改为卡片引导），
+    每页左上角可返回入口层。
+    """
+    scene_renderers = {
+        "query": _tab_query, "register": _tab_register, "ledger": _tab_ledger,
+        "recon": _tab_recon, "fund": _tab_fund_batches, "dual": _tab_dual_recon,
+        "import": _tab_import,
+    }
+    scene = st.session_state.get(DC_SCENE_KEY)
+    if scene not in scene_renderers:
+        _render_scene_entry()
+        return
+    if st.button("← 返回业务入口", key="dc_scene_back"):
+        st.session_state.pop(DC_SCENE_KEY, None)
+        st.rerun()
+    title = next((t for k, _icon, t, _desc in DC_SCENES if k == scene), "")
+    st.subheader(f"📊 数据核对 · {title}")
+    scene_renderers[scene]()
+
+
+def _render_scene_entry() -> None:
+    """入口层：业务场景卡片（整卡可点，单击直达，文案大白话）。"""
     st.header("📊 数据核对")
-    st.caption("班列统一编号 · 联运结算与补贴对账（v1）　|　"
+    st.caption("班列统一编号 · 联运结算与补贴对账　|　"
                "编号规则：发运日期-发站-口岸-目的地-L/T，同日同线路同类型自动加 -01 后缀")
-
-    tab_query, tab_ledger, tab_register, tab_recon, tab_fund, tab_dual, tab_import = st.tabs(
-        ["🔎 编号查询", "📋 班列台账", "➕ 登记班列", "⚖️ 三方对账",
-         "💰 资金/费用批次", "🧮 双表对账", "📥 Excel导入"])
-
-    with tab_query:
-        _tab_query()
-    with tab_ledger:
-        _tab_ledger()
-    with tab_register:
-        _tab_register()
-    with tab_recon:
-        _tab_recon()
-    with tab_fund:
-        _tab_fund_batches()
-    with tab_dual:
-        _tab_dual_recon()
-    with tab_import:
-        _tab_import()
+    st.markdown("#### 请选择要办理的业务")
+    st.markdown('<div class="ceb-cards-anchor"></div>', unsafe_allow_html=True)
+    for row in range(0, len(DC_SCENES), 2):
+        cols = st.columns(2)
+        for col, (key, icon, title, desc) in zip(cols, DC_SCENES[row:row + 2]):
+            with col:
+                if st.button(f"{icon} **{title}**\n\n{desc}",
+                             use_container_width=True, key=f"dc_scene_{key}"):
+                    st.session_state[DC_SCENE_KEY] = key
+                    st.rerun()
 
 
 # ---------------------------------------------------------------- 🔎 编号查询
@@ -554,10 +599,21 @@ def _tab_query() -> None:
     with col_b:
         picks = _route_selectors(code_map, "q_route")
     if st.button("🔍 查询编号", type="primary"):
-        st.session_state["q_result"] = dc_lookup(
-            dep_date=q_date.isoformat() if q_date else "",
-            station=picks["station"], port=picks["port"], dest=picks["dest"])
-    result = st.session_state.get("q_result")
+        st.session_state["q_result"] = {
+            "params": (q_date.isoformat() if q_date else "",
+                       picks["station"], picks["port"], picks["dest"]),
+            "payload": dc_lookup(
+                dep_date=q_date.isoformat() if q_date else "",
+                station=picks["station"], port=picks["port"], dest=picks["dest"]),
+        }
+    # 查询条件一变，旧结果自动失效隐藏（防止照着旧条件抄错编号）
+    cached = st.session_state.get("q_result")
+    cur_params = (q_date.isoformat() if q_date else "",
+                  picks["station"], picks["port"], picks["dest"])
+    if cached and cached.get("params") != cur_params:
+        st.caption("查询条件已变化，请重新点击「🔍 查询编号」获取新结果。")
+        return
+    result = (cached or {}).get("payload")
     if not result:
         return
     trips = result.get("trips", [])
@@ -582,7 +638,7 @@ def _tab_query() -> None:
         _safe_audit(audit.DC_COPY_NUMBER, "trip", no)   # 展示即视为可复制，尽力留痕
     locked = [e for e in ests if e.get("official_no")]
     if locked:
-        st.markdown("##### 相关预估编号沿革")
+        st.markdown("#### 相关预估编号沿革")
         for e in locked:
             st.markdown(f"- `{e['est_no']}` → 已锁定为 "
                         f"`{e['official_no']}`")
@@ -621,7 +677,7 @@ def _tab_ledger() -> None:
     trip = detail["trip"]
     checks = detail["checks"]
 
-    st.markdown(f"#### `{trip_no}`")
+    st.markdown(f"### `{trip_no}`")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("车数", trip.get("wagon_count") if trip.get("wagon_count") is not None else "—")
@@ -634,11 +690,13 @@ def _tab_ledger() -> None:
         status = (detail.get("settlement") or {}).get("record_status", "pending")
         st.metric("结算状态", RECORD_STATUS_LABELS.get(status, status))
 
+    # 四个编辑区默认全部收起（Issue #6：辅助内容默认折叠，点标题才展开，
+    # 避免一进来就是一屏表单）
     sec_basic, sec_settle, sec_prepay, sec_subsidy = st.expander(
         "🧾 班列基础信息", expanded=False), st.expander(
-        "💰 联运费用结算与实付", expanded=True), st.expander(
-        "💳 预付款记录", expanded=True), st.expander(
-        "🏛️ 补贴测算与复核", expanded=True)
+        "💰 联运费用结算与实付", expanded=False), st.expander(
+        "💳 预付款记录", expanded=False), st.expander(
+        "🏛️ 补贴测算与复核", expanded=False)
     with sec_basic:
         _edit_basic(trip)
     with sec_settle:
@@ -649,7 +707,7 @@ def _tab_ledger() -> None:
         _edit_subsidy(trip_no, detail)
 
     if detail.get("est_history"):
-        st.markdown("##### 📜 编号沿革（预估编号 → 正式编号，留痕）")
+        st.markdown("#### 📜 编号沿革（预估编号 → 正式编号，留痕）")
         for e in detail["est_history"]:
             st.markdown(f"- `{e['est_no']}` → `{trip_no}`　"
                         f"锁定人 {e.get('locked_by') or '—'}　"
@@ -813,7 +871,7 @@ def _edit_subsidy(trip_no: str, detail: dict) -> None:
                 st.success("已保存（修改已留痕）。")
                 st.rerun()
 
-    st.markdown("###### 复核标记")
+    st.markdown("#### 复核标记")
     c1, c2 = st.columns([2, 1])
     with c1:
         new_review = st.selectbox("复核状态", list(REVIEW_STATUS_LABELS),
@@ -832,7 +890,7 @@ def _edit_subsidy(trip_no: str, detail: dict) -> None:
 
 def _tab_register() -> None:
     code_map = dc_codes()
-    st.markdown("#### 正式登记（发运日期已确定）")
+    st.markdown("### 正式登记（发运日期已确定）")
     st.caption("编号 = 发运日期-发站-口岸-目的地-L/T；同日同线路同类型已存在时"
                "自动追加 -01/-02（如 `20251010-PW-MZL-RU-T-01`）。")
     with st.form("reg_form", border=True):
@@ -845,7 +903,8 @@ def _tab_register() -> None:
                              format_func=lambda v: TRAIN_TYPE_LABELS[v],
                              horizontal=True)
         with c2:
-            picks = _route_selectors(code_map, "reg_route")
+            picks = _route_selectors(code_map, "reg_route",
+                                     all_label="（请选择）")
             goods = st.text_input("货物品名")
         c3, c4, c5 = st.columns(3)
         with c3:
@@ -890,7 +949,7 @@ def _tab_register() -> None:
             st.session_state.pop("reg_matching_ests")
 
     st.divider()
-    st.markdown("#### 预估登记（发运日期未确定，需先登记预付款等）")
+    st.markdown("### 预估登记（发运日期未确定，需先登记预付款等）")
     st.caption("编号格式：`EST-` + 预估日期主干。发运日期确定后在此锁定为正式编号，"
                "映射与预付款改挂自动留痕。")
     with st.form("est_form", border=True):
@@ -903,7 +962,8 @@ def _tab_register() -> None:
                                 format_func=lambda v: TRAIN_TYPE_LABELS[v],
                                 horizontal=True, key="est_type")
         with c2:
-            est_picks = _route_selectors(code_map, "est_route")
+            est_picks = _route_selectors(code_map, "est_route",
+                                         all_label="（请选择）")
         if st.form_submit_button("🧪 生成预估编号", type="primary"):
             if est_date is None:
                 st.error("请选择预估发运日期。")
@@ -957,7 +1017,7 @@ def _tab_recon() -> None:
 
     flagged = [t for t in trips if (t.get("three_way") or {}).get("flag")]
     if flagged:
-        st.markdown("##### ⚖️ 需人工关注的差异明细")
+        st.markdown("### ⚖️ 需人工关注的差异明细")
         for t in flagged:
             with st.expander(f"{t['trip_no']}（{t['dep_date']}）"):
                 for pair in t["three_way"]["pairs"]:
@@ -968,7 +1028,7 @@ def _tab_recon() -> None:
                         f"　→ {pair['message']}")
 
     if dup:
-        st.markdown("##### ⚠️ 相邻记录重复值检测（简单精确相等，请人工复核）")
+        st.markdown("### ⚠️ 相邻记录重复值检测（简单精确相等，请人工复核）")
         for trip_no, flags in sorted(dup.items()):
             for f in flags:
                 st.markdown(f"- `{trip_no}` 的 **{f['label']}** = "
@@ -993,6 +1053,7 @@ def _tab_import() -> None:
                            else "补贴测算导入模板.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     up = st.file_uploader("上传 Excel（.xlsx）", type=["xlsx"], key="imp_file")
+    st.caption("选择要导入的差异结果 Excel，单个文件最大 200MB。")
     if not up:
         st.session_state.pop("imp_preview", None)
         return
@@ -1009,6 +1070,25 @@ def _tab_import() -> None:
     decisions = st.session_state.setdefault("imp_decisions", {})
     action_badge = {"new": "🆕 新增", "same": "✅ 一致", "conflict": "⚔️ 冲突",
                     "error": "⛔ 错误"}
+    # 冲突行可逐行展开决定，也可一键批量决定（批量后仍可逐行改）——
+    # 避免几十行时逐行展开点选（Issue #6 排查项）
+    conflict_rows = [r for r in rows if r["action"] == "conflict"]
+    if conflict_rows:
+        st.caption(f"共 {len(conflict_rows)} 行与库内冲突，需要决定保留哪一边："
+                   "可逐行展开选择，也可一键批量决定。")
+        bk1, bk2, _ = st.columns([1.2, 1.4, 3])
+        with bk1:
+            if st.button("全部保留现有", key="imp_bulk_keep",
+                         use_container_width=True):
+                for r in conflict_rows:
+                    st.session_state[f"imp_dec_{r['row_index']}"] = "保留现有"
+                st.rerun()
+        with bk2:
+            if st.button("全部覆盖为导入值", key="imp_bulk_overwrite",
+                         use_container_width=True):
+                for r in conflict_rows:
+                    st.session_state[f"imp_dec_{r['row_index']}"] = "覆盖为导入值"
+                st.rerun()
     for row in rows:
         if row["action"] == "same":
             continue
@@ -1067,7 +1147,7 @@ _BATCH_VERDICT_LABEL = {
 
 
 def _tab_fund_batches() -> None:
-    st.markdown("##### 资金/费用批次（一笔钱覆盖多趟车 / 多笔钱结清同一批车）")
+    st.markdown("### 资金/费用批次（一笔钱覆盖多趟车 / 多笔钱结清同一批车）")
     st.caption("批次总金额是唯一权威数字；只需告诉系统「这张付款单/发票覆盖哪几趟车、"
                "总共多少钱」，每趟车分摊金额可以留空，系统按批次整体核对——"
                "不再因某趟车账面记0就误报亏损。")
@@ -1129,7 +1209,7 @@ def _tab_fund_batches() -> None:
                 _fund_participates_editor(b)
 
     st.divider()
-    st.markdown("##### 🕸️ 孤儿/重复登记检测（安全网）")
+    st.markdown("### 🕸️ 孤儿/重复登记检测（安全网）")
     if st.button("运行检测"):
         r = _api("GET", "/datacheck/fund-batches/orphan-check/run")
         result = r.json() if r is not None else fund_store.run_orphan_check()
@@ -1290,7 +1370,7 @@ def _row_brief(side: str, row: dict | None) -> str:
 
 
 def _tab_dual_recon() -> None:
-    st.markdown("##### 双表对账导入（己方台账 × 联运公司对账单）")
+    st.markdown("### 双表对账导入（己方台账 × 联运公司对账单）")
     st.caption("判定口径：**只看结算合计是否一致**（科目细项差异如代理费并入"
                "铁路运费，仅展示不报警）。已确认的自动入库；其余按下方任务清单处理。")
 
@@ -1301,14 +1381,18 @@ def _tab_dual_recon() -> None:
     with c2:
         agent_file = st.file_uploader("② 联运公司对账单",
                                       type=["xlsx"], key="dual_agent")
-    if not (own_file and agent_file):
-        st.info("请同时上传两份文件后点击预览。")
-        return
-    if st.button("🔎 解析并配对预览", type="primary"):
+    st.caption("两份文件均为 .xlsx，单个文件最大 200MB。")
+    # 按钮常驻 + 未就绪禁用（P2-5：空态也给出"下一步"，不再是只有一行提示）
+    ready = bool(own_file and agent_file)
+    if st.button("🔎 解析并配对预览", type="primary", disabled=not ready):
         st.session_state["dual_preview"] = dc_dual_preview(
             own_file.getvalue(), own_file.name,
             agent_file.getvalue(), agent_file.name)
         st.session_state.pop("dual_decisions", None)
+    if not ready:
+        st.info("请同时上传两份文件（① 己方台账 + ② 联运公司对账单），"
+                "然后点击上方「🔎 解析并配对预览」。")
+        return
 
     preview = st.session_state.get("dual_preview")
     if not preview:

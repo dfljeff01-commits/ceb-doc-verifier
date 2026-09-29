@@ -30,7 +30,8 @@ import audit
 import auth_service
 from webapp import admin_audit, admin_codes, admin_users, data_check, doc_verify
 from webapp import session
-from webapp.styles import APP_CSS
+from webapp.format import fmt_dt
+from webapp.styles import APP_CSS, LOGIN_CSS
 
 st.set_page_config(
     page_title="中欧班列单证智能核验 · 内部系统",
@@ -68,91 +69,119 @@ def _client_ip() -> str:
 
 
 def render_login() -> None:
-    st.markdown('<div class="ceb-login-box">', unsafe_allow_html=True)
-    st.markdown("### 🚂 中欧班列单证智能核验系统")
-    st.caption("内部业务系统 · 仅限公司内部网络访问 · 请使用公司分配的账号登录")
+    """登录页：左右分栏（品牌区 + 登录表单）。
 
-    with st.form("login_form", clear_on_submit=False):
-        username = st.text_input("用户名", autocomplete="username")
-        password = st.text_input("密码", type="password", autocomplete="current-password")
-        submitted = st.form_submit_button("登 录", type="primary", use_container_width=True)
+    只改版式与品牌呈现：认证、失败留痕、令牌签发逻辑与原实现完全一致
+    （Issue #5 的登录/登出控制逻辑不动）。
+    """
+    st.markdown(LOGIN_CSS, unsafe_allow_html=True)
+    # 侧栏保持可见（不隐藏）：登录前导航本就只有"登录"一项（P2-9 口径，
+    # 不暴露内部页面），放上品牌信息避免"侧栏被藏起来不知从哪展开"。
+    with st.sidebar:
+        st.subheader("🚂 中欧班列单证智能核验系统")
+        st.caption("大同陆港供应链管理有限公司 · 内部系统")
+        st.caption("登录后按角色显示可用功能。")
+    brand_col, form_col = st.columns([6, 5], gap="large")
+    with brand_col:
+        st.markdown(
+            '<div class="ceb-brand-panel"><div>'
+            '<div class="co">大同陆港供应链管理有限公司</div>'
+            '<div class="sys">🚂 中欧班列单证智能核验系统</div>'
+            '<div class="tag">发运前自动核验单证一致性、齐全性与路线合规，'
+            '降低边境滞留与退运风险</div>'
+            '</div>'
+            '<div class="foot">内部业务系统 · 仅限公司内部网络访问 · 全程操作留痕</div>'
+            '</div>', unsafe_allow_html=True)
+    with form_col:
+        st.markdown('<div class="ceb-login-form-anchor"></div>', unsafe_allow_html=True)
+        st.markdown("### 🔑 用户登录")
+        st.caption("请使用公司分配的账号登录")
 
-    if submitted:
-        try:
-            user = auth_service.authenticate(username.strip(), password)
-        except auth_service.AuthError as exc:
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("用户名", autocomplete="username")
+            password = st.text_input("密码", type="password", autocomplete="current-password")
+            submitted = st.form_submit_button("登 录", type="primary", use_container_width=True)
+
+        if submitted:
             try:
-                audit.record(username.strip() or "anonymous", audit.LOGIN_FAILED,
-                             "user", username.strip() or None,
-                             detail={"reason": exc.message, "via": "web"},
-                             ip=_client_ip())
-            except Exception:
-                pass
-            st.error(exc.message)
-        else:
-            token = auth_service.create_token(user)
-            try:
-                audit.record(user["username"], audit.LOGIN, "user", user["username"],
-                             detail={"via": "web"}, ip=_client_ip())
-            except Exception:
-                pass
-            session.login(user, token["access_token"], token["expires_at"])
-            st.rerun()
+                user = auth_service.authenticate(username.strip(), password)
+            except auth_service.AuthError as exc:
+                try:
+                    audit.record(username.strip() or "anonymous", audit.LOGIN_FAILED,
+                                 "user", username.strip() or None,
+                                 detail={"reason": exc.message, "via": "web"},
+                                 ip=_client_ip())
+                except Exception:
+                    pass
+                st.error(exc.message)
+            else:
+                token = auth_service.create_token(user)
+                try:
+                    audit.record(user["username"], audit.LOGIN, "user", user["username"],
+                                 detail={"via": "web"}, ip=_client_ip())
+                except Exception:
+                    pass
+                session.login(user, token["access_token"], token["expires_at"])
+                st.rerun()
 
-    st.caption("忘记密码请联系管理员重置。连续登录失败会记录在操作日志中。")
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.caption("忘记密码请联系管理员重置。连续登录失败会记录在操作日志中。")
 
 
-# ---------------------------------------------------------------- 首页（双入口卡片）
+# ---------------------------------------------------------------- 首页（业务模块入口层）
 
 def render_home() -> None:
+    """首页 = "您要办理哪项业务？"模块入口层（Issue #6 引导式首层）。
+
+    整张卡片就是可点链接（page_link 渲染为卡片样式），单击直达模块，
+    不再有"卡片纯展示、真正跳转是卡片下方小按钮"的两段式。
+    """
     user = session.current_user() or {}
-    st.title("🏠 功能入口")
+    st.title("🏠 请选择要办理的业务")
     st.caption(f"中欧班列单证智能核验 · 内部系统（初级版）　|　"
                f"当前登录：**{user.get('username', '—')}**（{user.get('role_label', '—')}）")
 
     role = user.get("role", "")
+    st.markdown('<div class="ceb-cards-anchor"></div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
     with col1:
-        allowed_doc = role in ("business", "admin")
-        st.markdown(
-            '<div class="ceb-entry-card">'
-            '<span style="font-size:34px;">🔍</span>'
-            '<div class="t">单据核对</div>'
-            '<div class="d">上传/选择单证批次 → AI核验一致性、齐全性与路线合规 → '
-            '风险评分与整改建议 → 生成整改邮件与PDF报告。<br>'
-            '<span style="color:#94A3B8;">支持示例批次、PDF向导上传、App现场批次复查。</span></div>'
-            '</div>', unsafe_allow_html=True)
-        if allowed_doc:
-            st.page_link(PAGE_DOC, label="进入单据核对 →", icon="🔍",
-                         use_container_width=True)
+        if role in ("business", "admin"):
+            st.page_link(
+                PAGE_DOC, icon="🔍", use_container_width=True,
+                label="**单据核对**\n\n上传单证照片或 PDF，AI 自动核对内容是否一致、"
+                      "齐全、路线合规，出具风险评分与整改材料")
         else:
-            st.caption("（当前角色不可用：财务角色对单据核验数据的可见性待业务侧确认）")
+            st.markdown(
+                '<div class="ceb-entry-card-disabled">'
+                '<span style="font-size:30px;">🔍</span>'
+                '<div class="t">单据核对</div>'
+                '<div class="d">（当前角色不可用：财务角色对单据核验数据的可见性'
+                '待业务侧确认）</div></div>', unsafe_allow_html=True)
     with col2:
-        st.markdown(
-            '<div class="ceb-entry-card">'
-            '<span style="font-size:34px;">📊</span>'
-            '<div class="t">数据核对</div>'
-            '<div class="d">班列统一编号生成与查询（一键复制）→ 联运费用结算/预付款/实付核对 → '
-            '补贴测算与三方对账 → Excel差异导入。<br>'
-            '<span style="color:#94A3B8;">编号规则：发运日期-发站-口岸-目的地-L/T；'
-            '客户报价、客户预付款与票据管理不在当前版本范围内。</span></div>'
-            '</div>', unsafe_allow_html=True)
         if role in ("finance", "admin"):
-            st.page_link(PAGE_DATA, label="进入数据核对 →", icon="📊", use_container_width=True)
+            st.page_link(
+                PAGE_DATA, icon="📊", use_container_width=True,
+                label="**数据核对**\n\n查班列编号、登记班列、维护结算台账、"
+                      "三方对账、双表对账与 Excel 差异导入")
         else:
-            st.caption("（当前角色不可用：数据核对面向财务/管理员角色）")
+            st.markdown(
+                '<div class="ceb-entry-card-disabled">'
+                '<span style="font-size:30px;">📊</span>'
+                '<div class="t">数据核对</div>'
+                '<div class="d">（当前角色不可用：数据核对面向财务/管理员角色）</div>'
+                '</div>', unsafe_allow_html=True)
 
     if role == "admin":
         st.divider()
-        st.markdown("##### 管理员快捷入口")
-        c1, c2, c3, _ = st.columns([1, 1, 1, 2])
-        with c1:
-            st.page_link(PAGE_USERS, label="用户管理", icon="👤", use_container_width=True)
-        with c2:
-            st.page_link(PAGE_CODES, label="代码字典", icon="🔤", use_container_width=True)
-        with c3:
-            st.page_link(PAGE_AUDIT, label="操作日志", icon="📜", use_container_width=True)
+        st.markdown("### 管理员快捷入口")
+        with st.container(border=True):
+            st.markdown('<div class="ceb-secondary-anchor"></div>', unsafe_allow_html=True)
+            c1, c2, c3, _ = st.columns([1, 1, 1, 2])
+            with c1:
+                st.page_link(PAGE_USERS, label="👤 用户管理", use_container_width=True)
+            with c2:
+                st.page_link(PAGE_CODES, label="🔤 代码字典", use_container_width=True)
+            with c3:
+                st.page_link(PAGE_AUDIT, label="📜 操作日志", use_container_width=True)
 
     st.divider()
     st.caption("本系统仅限公司内部部署使用，不面向公网提供服务（持续维护原则，见 README）。")
@@ -160,11 +189,15 @@ def render_home() -> None:
 
 # ---------------------------------------------------------------- 组装导航
 
-PAGE_HOME = st.Page(render_home, title="首页", icon="🏠", default=True)
-
 if not session.is_logged_in():
-    render_login()
+    # 登录前只注册登录页（P2-9）：导航若沿用上一次运行的页面清单，
+    # 退出登录后侧边栏会残留"数据核对/用户管理/操作日志"等内部入口。
+    login_page = st.Page(render_login, title="登录", icon="🔑",
+                         url_path="login", default=True)
+    st.navigation([login_page]).run()
     st.stop()
+
+PAGE_HOME = st.Page(render_home, title="首页", icon="🏠", default=True)
 
 role = session.current_role()
 PAGE_DOC = st.Page(doc_verify.render, title="单据核对", icon="🔍", url_path="doc-verify")
@@ -184,7 +217,7 @@ with st.sidebar:
     st.markdown(f"👤 **{user.get('username', '—')}**（{user.get('role_label', '—')}）")
     expires = st.session_state.get(session.TOKEN_EXPIRES_KEY, "")
     if expires:
-        st.caption(f"登录有效期至 {expires.replace('T', ' ')}")
+        st.caption(f"登录有效期至 {fmt_dt(expires)}")
     if st.button("🚪 退出登录", use_container_width=True):
         try:
             audit.record(session.current_username(), audit.LOGOUT, "user",
